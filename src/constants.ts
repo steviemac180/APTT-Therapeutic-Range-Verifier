@@ -1,0 +1,30 @@
+import { ProcessedDataRow, AnalysisConfig } from './types';
+
+export const DEFAULT_XA_RANGE = { lower: 0.3, upper: 0.7 };
+export const DEFAULT_APTT_RANGE = { lower: 60, upper: 100 };
+
+export const DEFAULT_RISK_WEIGHTS = {
+  subToTherapeutic: 1.0,
+  supraToTherapeutic: 1.5,
+  therapeuticToOutside: 0.8,
+  subToSupra: 2.0,
+  supraToSub: 2.0,
+};
+
+export const DEFAULT_MU_BANDS = (xaRange: { lower: number, upper: number }, apttRange: { lower: number, upper: number }) => ({
+  xa: [
+    { lowerBound: 0, upperBound: xaRange.lower, value: 0.05, unit: 'SD' as const },
+    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 10, unit: 'CV%' as const },
+    { lowerBound: xaRange.upper, upperBound: 2.0, value: 15, unit: 'CV%' as const },
+  ],
+  apttCurrent: [
+    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0, unit: 'SD' as const },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5, unit: 'CV%' as const },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 8, unit: 'CV%' as const },
+  ],
+  apttNew: [
+    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0, unit: 'SD' as const },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5, unit: 'CV%' as const },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 8, unit: 'CV%' as const },
+  ],
+});
