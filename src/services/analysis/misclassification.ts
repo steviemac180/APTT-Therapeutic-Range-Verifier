@@ -32,62 +32,59 @@ const calculateWeightedScore = (matrix: ConfusionMatrix, weights: AnalysisConfig
   return score;
 };
 
+export const calculateSingleRangeMisclassification = (
+  data: ProcessedDataRow[],
+  range: Range,
+  config: AnalysisConfig,
+  apttField: 'apttCurrent' | 'apttNew' = 'apttNew'
+): MisclassificationData => {
+  const matrix = createEmptyMatrix();
+  
+  if (data.length === 0) {
+    return {
+      total: 0,
+      rate: 0,
+      weightedScore: 0,
+      matrix
+    };
+  }
+
+  data.forEach(row => {
+    if (row.xa === null) return;
+    const xaCat = getCategory(row.xa, config.therapeuticXaRange);
+    const apttVal = row[apttField];
+    
+    if (apttVal !== null) {
+      const apttCat = getCategory(apttVal, range);
+      matrix[xaCat][apttCat]++;
+    }
+  });
+
+  const total = data.length;
+  const mismatches = 
+    matrix.below.therapeutic + matrix.below.above +
+    matrix.therapeutic.below + matrix.therapeutic.above +
+    matrix.above.below + matrix.above.therapeutic;
+  
+  const rate = (mismatches / total) * 100;
+  const weightedScore = calculateWeightedScore(matrix, config.riskWeights);
+  
+  return {
+    total,
+    rate: Math.round(rate * 10) / 10,
+    weightedScore: Math.round(weightedScore * 10) / 10,
+    matrix
+  };
+};
+
 export const calculateMisclassificationRates = (
   data: ProcessedDataRow[],
   currentRange: Range,
   proposedRange: Range,
   config: AnalysisConfig
 ) => {
-  const currentMatrix = createEmptyMatrix();
-  const proposedMatrix = createEmptyMatrix();
-  
-  if (data.length === 0) {
-    const emptyData: MisclassificationData = {
-      total: 0,
-      rate: 0,
-      weightedScore: 0,
-      matrix: currentMatrix
-    };
-    return { current: emptyData, proposed: emptyData, improvement: 0, weightedImprovement: 0 };
-  }
-
-  data.forEach(row => {
-    if (row.xa === null) return;
-    const xaCat = getCategory(row.xa, config.therapeuticXaRange);
-    
-    // Current lot
-    if (row.apttCurrent !== null) {
-      const currentApttCat = getCategory(row.apttCurrent, currentRange);
-      currentMatrix[xaCat][currentApttCat]++;
-    }
-
-    // Proposed lot
-    if (row.apttNew !== null) {
-      const proposedApttCat = getCategory(row.apttNew, proposedRange);
-      proposedMatrix[xaCat][proposedApttCat]++;
-    }
-  });
-
-  const calculateData = (matrix: ConfusionMatrix): MisclassificationData => {
-    const total = data.length;
-    const mismatches = 
-      matrix.below.therapeutic + matrix.below.above +
-      matrix.therapeutic.below + matrix.therapeutic.above +
-      matrix.above.below + matrix.above.therapeutic;
-    
-    const rate = (mismatches / total) * 100;
-    const weightedScore = calculateWeightedScore(matrix, config.riskWeights);
-    
-    return {
-      total,
-      rate: Math.round(rate * 10) / 10,
-      weightedScore: Math.round(weightedScore * 10) / 10,
-      matrix
-    };
-  };
-
-  const current = calculateData(currentMatrix);
-  const proposed = calculateData(proposedMatrix);
+  const current = calculateSingleRangeMisclassification(data, currentRange, config, 'apttCurrent');
+  const proposed = calculateSingleRangeMisclassification(data, proposedRange, config, 'apttNew');
   
   return {
     current,

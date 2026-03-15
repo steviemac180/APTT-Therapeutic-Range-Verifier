@@ -4,6 +4,7 @@ import { calculateMUAdjustments, calculateSampleWeights } from './analysis/muHan
 import { fitDemingRegression, predictRange } from './analysis/regression';
 import { calculateMisclassificationRates } from './analysis/misclassification';
 import { generateRecommendations } from './analysis/recommendation';
+import { analyzeTemporalSignals } from './analysis/temporal';
 
 const runBootstrap = (data: ProcessedDataRow[], config: AnalysisConfig, iterations: number): Promise<any> => {
   return new Promise((resolve, reject) => {
@@ -110,6 +111,9 @@ export const runAnalysis = async (
     { method: newModel.method, reason: newModel.reason }
   );
 
+  // 7. Temporal Analysis
+  const temporalSignal = analyzeTemporalSignals(data, comparisons, config);
+
   return {
     summary,
     decision,
@@ -123,6 +127,11 @@ export const runAnalysis = async (
     misclassification,
     regressionMethod: newModel.method,
     regressionReason: newModel.reason,
+    regressionModel: {
+      slope: newModel.slope,
+      intercept: newModel.intercept,
+      r2: newModel.r2
+    },
     uncertainty: {
       lowerInterval,
       upperInterval,
@@ -131,6 +140,7 @@ export const runAnalysis = async (
       upperShiftInterval,
       widthShiftInterval,
       iterations
-    }
+    },
+    temporalSignal
   };
 };

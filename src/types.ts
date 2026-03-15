@@ -87,6 +87,7 @@ export interface AnalysisConfig {
     apttNew: 'SD' | 'CV%';
   };
   analysisDepth: 'Standard' | 'Advanced';
+  includeMU: boolean;
   riskWeights: {
     subToTherapeutic: number;
     supraToTherapeutic: number;
@@ -162,6 +163,11 @@ export interface AnalysisResults {
   };
   regressionMethod: 'Weighted Deming' | 'Standard Deming';
   regressionReason?: string;
+  regressionModel: {
+    slope: number;
+    intercept: number;
+    r2: number;
+  };
   warnings: string[];
   uncertainty: {
     lowerInterval: [number, number];
@@ -171,6 +177,19 @@ export interface AnalysisResults {
     upperShiftInterval: [number, number];
     widthShiftInterval: [number, number];
     iterations: number;
+  };
+  temporalSignal?: {
+    possible: boolean;
+    status: 'absent' | 'possible' | 'repeated' | 'insufficient_data';
+    metrics: {
+      year: number;
+      slope: number;
+      intercept: number;
+      r2: number;
+      n: number;
+      label: string;
+    }[];
+    interpretation: string;
   };
 }
 

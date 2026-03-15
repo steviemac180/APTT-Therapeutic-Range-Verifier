@@ -91,49 +91,56 @@ const fitWeightedDeming = (
   const x = data.map(d => d[xKey] as number);
   const y = data.map(d => d[yKey] as number);
 
-  // Iterative approach for Weighted Deming (Linnet's method)
-  let slope = 1.0; // Initial guess
+  // Initial guess for slope using unweighted Deming or OLS
+  let slope = 1.0;
   let intercept = 0;
   
-  const maxIterations = 20;
-  const tolerance = 1e-6;
+  const maxIterations = 50;
+  const tolerance = 1e-7;
 
   for (let iter = 0; iter < maxIterations; iter++) {
     const prevSlope = slope;
     
-    let sumW = 0;
-    let sumWX = 0;
-    let sumWY = 0;
+    // Calculate weights W_i = 1 / (var_yi + slope^2 * var_xi)
+    // Since weights[i].wx = 1/var_xi and weights[i].wy = 1/var_yi
+    // W_i = 1 / (1/wy + slope^2 / wx) = (wx * wy) / (wx + slope^2 * wy)
+    const W = weights.map(wt => (wt.wx * wt.wy) / (wt.wx + slope * slope * wt.wy));
     
-    const w = weights.map(wt => (wt.wx * wt.wy) / (slope * slope * wt.wy + wt.wx));
+    const sumW = W.reduce((a, b) => a + b, 0);
+    const meanX = W.reduce((a, b, i) => a + b * x[i], 0) / sumW;
+    const meanY = W.reduce((a, b, i) => a + b * y[i], 0) / sumW;
     
-    for (let i = 0; i < n; i++) {
-      sumW += w[i];
-      sumWX += w[i] * x[i];
-      sumWY += w[i] * y[i];
-    }
-    
-    const meanX = sumWX / sumW;
-    const meanY = sumWY / sumW;
-    
-    let num = 0;
-    let den = 0;
-    
+    let sxx = 0, syy = 0, sxy = 0;
     for (let i = 0; i < n; i++) {
       const dx = x[i] - meanX;
       const dy = y[i] - meanY;
-      num += w[i] * dy * dx;
-      den += w[i] * dx * dx;
+      sxx += W[i] * dx * dx;
+      syy += W[i] * dy * dy;
+      sxy += W[i] * dx * dy;
     }
     
-    slope = num / den;
+    // Lambda_eff = weighted average lambda? 
+    // Actually, for weighted Deming with varying lambda_i, we solve the quadratic:
+    // beta^2 * Sxy + beta * (lambda * Sxx - Syy) - lambda * Sxy = 0
+    // But here lambda is effectively incorporated into the weights W_i.
+    // A common approximation for weighted Deming is to use the weighted sums of squares:
+    const lambda = syy / sxx; // This is a rough estimate for the iteration
+    
+    // Using the Deming formula on weighted sums:
+    const diff = syy - sxx; // Assuming lambda=1 for the weighted sums because variances are in W
+    
+    if (Math.abs(sxy) < 1e-10) {
+      slope = syy > sxx ? 1e6 : 0; // Avoid division by zero
+    } else {
+      slope = (diff + Math.sqrt(diff * diff + 4 * sxy * sxy)) / (2 * sxy);
+    }
+    
     intercept = meanY - slope * meanX;
     
     if (Math.abs(slope - prevSlope) < tolerance) break;
   }
 
-  // Calculate R2 (weighted version)
-  const meanX = x.reduce((a, b) => a + b, 0) / n;
+  // Calculate R2 (weighted)
   const meanY = y.reduce((a, b) => a + b, 0) / n;
   let ssRes = 0;
   let ssTot = 0;

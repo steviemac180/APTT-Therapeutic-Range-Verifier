@@ -29,6 +29,10 @@ export const calculateSampleWeights = (
   const xVal = row.xa || 0;
   const yVal = row[yKey] || 0;
 
+  if (!config.includeMU) {
+    return { wx: 1, wy: 1 };
+  }
+
   const sdX = findBandValue(xVal, config.muBands.xa, config.muUnits.xa);
   const sdY = findBandValue(yVal, yKey === 'apttNew' ? config.muBands.apttNew : config.muBands.apttCurrent, yKey === 'apttNew' ? config.muUnits.apttNew : config.muUnits.apttCurrent);
 

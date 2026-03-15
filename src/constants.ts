@@ -19,18 +19,18 @@ export const DEFAULT_MU_UNITS = {
 
 export const DEFAULT_MU_BANDS = (xaRange: { lower: number, upper: number }, apttRange: { lower: number, upper: number }) => ({
   xa: [
-    { lowerBound: 0, upperBound: xaRange.lower, value: 0.05 },
-    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 0.06 },
-    { lowerBound: xaRange.upper, upperBound: 2.0, value: 0.06 },
+    { lowerBound: 0, upperBound: xaRange.lower, value: 0.04 },
+    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 0.08 },
+    { lowerBound: xaRange.upper, upperBound: 2.0, value: 0.12 },
   ],
   apttCurrent: [
-    { lowerBound: 0, upperBound: apttRange.lower, value: 1.2 },
-    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 1.2 },
-    { lowerBound: apttRange.upper, upperBound: 200, value: 1.2 },
+    { lowerBound: 0, upperBound: apttRange.lower, value: 1.0 },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 2.5 },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 4.0 },
   ],
   apttNew: [
-    { lowerBound: 0, upperBound: apttRange.lower, value: 1.2 },
-    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 1.2 },
-    { lowerBound: apttRange.upper, upperBound: 200, value: 1.2 },
+    { lowerBound: 0, upperBound: apttRange.lower, value: 1.0 },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 2.5 },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 4.0 },
   ],
 });

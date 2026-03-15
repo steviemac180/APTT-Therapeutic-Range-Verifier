@@ -24,12 +24,29 @@ import {
   Plus,
   Trash2,
   Save,
-  TrendingUp
+  TrendingUp,
+  TrendingDown,
+  Activity
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
+import { 
+  ScatterChart, 
+  Scatter, 
+  XAxis, 
+  YAxis, 
+  ZAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer,
+  Line,
+  LineChart,
+  ComposedChart,
+  ReferenceArea,
+  ReferenceLine
+} from 'recharts';
 import { 
   ProcessedDataRow, 
   AnalysisConfig, 
@@ -50,6 +67,7 @@ import {
 } from './constants';
 import { parseCSV, validateDataQuality, detectComparisons, getComparisonsSummary, exportProcessedDataToCSV } from './services/dataService';
 import { runAnalysis } from './services/statsService';
+import { calculateSingleRangeMisclassification } from './services/analysis/misclassification';
 
 // Utility for tailwind classes
 function cn(...inputs: ClassValue[]) {
@@ -108,9 +126,237 @@ function ConfusionMatrixTable({ data, title }: { data: ConfusionMatrix, title: s
   );
 }
 
+function RegressionVisualization({ data, results, config }: { data: ProcessedDataRow[], results: AnalysisResults, config: AnalysisConfig }) {
+  const chartData = useMemo(() => {
+    // Filter for usable data points
+    const usableData = data.filter(d => d.isUsable && d.xa !== null && d.apttNew !== null);
+    
+    // Sort by Xa for better line rendering
+    const sortedData = [...usableData].sort((a, b) => (a.xa || 0) - (b.xa || 0));
+    
+    // Create points for the regression line
+    const minXa = Math.min(...sortedData.map(d => d.xa || 0));
+    const maxXa = Math.max(...sortedData.map(d => d.xa || 0));
+    
+    const regressionPoints = [
+      { xa: minXa, aptt: results.regressionModel.intercept + results.regressionModel.slope * minXa },
+      { xa: maxXa, aptt: results.regressionModel.intercept + results.regressionModel.slope * maxXa }
+    ];
+
+    return {
+      points: sortedData.map(d => ({
+        xa: d.xa,
+        aptt: d.apttNew,
+        id: d.id
+      })),
+      line: regressionPoints
+    };
+  }, [data, results]);
+
+  return (
+    <div className="h-[400px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#00000008" vertical={false} />
+          <XAxis 
+            type="number" 
+            dataKey="xa" 
+            name="Anti-Xa" 
+            unit=" IU/mL" 
+            domain={['auto', 'auto']}
+            tick={{ fontSize: 10, fontWeight: 600 }}
+            label={{ value: 'Anti-Xa (IU/mL)', position: 'bottom', offset: 0, fontSize: 10, fontWeight: 700, textAnchor: 'middle' }}
+          />
+          <YAxis 
+            type="number" 
+            dataKey="aptt" 
+            name="APTT" 
+            unit="s" 
+            domain={['auto', 'auto']}
+            tick={{ fontSize: 10, fontWeight: 600 }}
+            label={{ value: 'APTT (Seconds)', angle: -90, position: 'left', offset: 0, fontSize: 10, fontWeight: 700, textAnchor: 'middle' }}
+          />
+          <Tooltip 
+            cursor={{ strokeDasharray: '3 3' }}
+            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', fontSize: '12px' }}
+          />
+          
+          {/* Therapeutic Xa Range Highlight */}
+          <ReferenceArea 
+            x1={config.therapeuticXaRange.lower} 
+            x2={config.therapeuticXaRange.upper} 
+            {...{ fill: '#10b981', fillOpacity: 0.05 } as any}
+          />
+          
+          {/* Proposed APTT Range Highlight */}
+          <ReferenceArea 
+            y1={results.proposedRange.lower} 
+            y2={results.proposedRange.upper} 
+            {...{ fill: '#10b981', fillOpacity: 0.05 } as any}
+          />
+
+          {/* Data Points */}
+          <Scatter 
+            name="Samples" 
+            data={chartData.points} 
+            fill="#141414" 
+            fillOpacity={0.4}
+            shape="circle"
+          />
+          
+          {/* Regression Line */}
+          <Line 
+            type="monotone" 
+            dataKey="aptt" 
+            data={chartData.line} 
+            stroke="#10b981" 
+            strokeWidth={3} 
+            dot={false} 
+            activeDot={false}
+            name="Deming Regression"
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
+  const signal = results.temporalSignal;
+  
+  if (!signal) return null;
+
+  if (!signal.possible) {
+    return (
+      <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm opacity-60">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 bg-black/[0.03] rounded-full flex items-center justify-center text-black/20">
+            <History size={20} />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold uppercase tracking-widest text-black/40">Trend / Temporal Signal Analysis</h4>
+            <p className="text-[10px] text-black/30 font-medium">Contextual assessment inactive.</p>
+          </div>
+        </div>
+        <div className="bg-black/[0.02] p-6 rounded-2xl border border-dashed border-black/10">
+          <p className="text-xs text-black/40 leading-relaxed italic">
+            {signal.interpretation} To enable temporal analysis, ensure your dataset includes successive comparisons where the 'New Lot ID' of one year matches the 'Current Lot ID' of the following year.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm">
+      <div className="flex items-center justify-between mb-8">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600">
+            <Activity size={20} />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Trend / Temporal Signal Analysis</h4>
+            <p className="text-xs text-black/40">Contextual assessment of lot behavior across successive years.</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={cn(
+            "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
+            signal.status === 'absent' ? "bg-emerald-50 text-emerald-600" :
+            signal.status === 'possible' ? "bg-amber-50 text-amber-600" :
+            "bg-red-50 text-red-600"
+          )}>
+            Signal: {signal.status.replace('_', ' ')}
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2">
+          <div className="h-[240px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={signal.metrics}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#00000008" />
+                <XAxis 
+                  dataKey="year" 
+                  axisLine={false} 
+                  tickLine={false} 
+                  tick={{ fontSize: 10, fill: '#00000040', fontWeight: 600 }}
+                  dy={10}
+                />
+                <YAxis 
+                  axisLine={false} 
+                  tickLine={false} 
+                  tick={{ fontSize: 10, fill: '#00000040', fontWeight: 600 }}
+                  domain={['auto', 'auto']}
+                />
+                <Tooltip 
+                  contentStyle={{ 
+                    borderRadius: '16px', 
+                    border: 'none', 
+                    boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1)',
+                    fontSize: '12px',
+                    fontWeight: 600
+                  }}
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="slope" 
+                  stroke="#6366f1" 
+                  strokeWidth={3} 
+                  dot={{ r: 6, fill: '#6366f1', strokeWidth: 2, stroke: '#fff' }}
+                  activeDot={{ r: 8, strokeWidth: 0 }}
+                  name="Regression Slope"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="mt-4 text-[10px] text-black/30 font-medium text-center uppercase tracking-widest">
+            Lot Sensitivity (Slope) Trend Across Linked Comparisons
+          </p>
+        </div>
+
+        <div className="space-y-6">
+          <div className="bg-indigo-50/30 p-6 rounded-2xl border border-indigo-100/50">
+            <h5 className="text-[10px] font-bold uppercase tracking-widest text-indigo-900/40 mb-3">Interpretation</h5>
+            <p className="text-xs text-indigo-900/80 leading-relaxed font-medium">
+              {signal.interpretation}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-black/[0.02] p-4 rounded-xl border border-black/5">
+              <p className="text-[8px] font-bold text-black/30 uppercase tracking-widest mb-1">Linked Lots</p>
+              <p className="text-lg font-bold text-black">{signal.metrics.length}</p>
+            </div>
+            <div className="bg-black/[0.02] p-4 rounded-xl border border-black/5">
+              <p className="text-[8px] font-bold text-black/30 uppercase tracking-widest mb-1">Stability</p>
+              <div className="flex items-center gap-2">
+                {signal.status === 'absent' ? (
+                  <CheckCircle2 size={16} className="text-emerald-500" />
+                ) : (
+                  <AlertTriangle size={16} className="text-amber-500" />
+                )}
+                <span className="text-xs font-bold text-black capitalize">{signal.status}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-black/5">
+            <p className="text-[10px] italic text-black/40 leading-relaxed">
+              Disclaimer: This analysis is supportive observational evidence based on historical lot performance. 
+              It is intended for context only and does not imply a causal relationship or serve as a primary decision basis.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>('setup');
-  const [dashboardTab, setDashboardTab] = useState<'executive' | 'technical'>('executive');
+  const [dashboardTab, setDashboardTab] = useState<'executive' | 'technical' | 'comparison'>('executive');
   const [setupStep, setSetupStep] = useState<SetupStep>('upload');
   
   // Data State
@@ -161,12 +407,39 @@ export default function App() {
     muBands: DEFAULT_MU_BANDS(DEFAULT_XA_RANGE, DEFAULT_APTT_RANGE),
     muUnits: DEFAULT_MU_UNITS,
     analysisDepth: 'Standard',
+    includeMU: true,
     riskWeights: DEFAULT_RISK_WEIGHTS
   });
 
   const [results, setResults] = useState<AnalysisResults | null>(null);
+  const [resultsNoMU, setResultsNoMU] = useState<AnalysisResults | null>(null);
+  const [useMU, setUseMU] = useState(true);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showConfusionMatrix, setShowConfusionMatrix] = useState(false);
+  const [showSimulation, setShowSimulation] = useState(false);
+  const [simulatedRange, setSimulatedRange] = useState<Range | null>(null);
+
+  const activeResults = useMU ? results : resultsNoMU;
+
+  const simulatedResults = useMemo(() => {
+    if (!activeResults || !simulatedRange || !rawData) return null;
+    
+    const activeData = rawData.filter(d => d.isUsable && (comparisons.find(c => c.id === d.comparisonId)?.included ?? true));
+    const simData = calculateSingleRangeMisclassification(activeData, simulatedRange, analysisConfig, 'apttNew');
+    
+    return {
+      ...simData,
+      width: Math.round((simulatedRange.upper - simulatedRange.lower) * 10) / 10,
+      vsCurrent: {
+        improvement: Math.round((activeResults.misclassification.current.rate - simData.rate) * 10) / 10,
+        weightedImprovement: Math.round((activeResults.misclassification.current.weightedScore - simData.weightedScore) * 10) / 10
+      },
+      vsProposed: {
+        improvement: Math.round((activeResults.misclassification.proposed.rate - simData.rate) * 10) / 10,
+        weightedImprovement: Math.round((activeResults.misclassification.proposed.weightedScore - simData.weightedScore) * 10) / 10
+      }
+    };
+  }, [activeResults, simulatedRange, rawData, comparisons, analysisConfig]);
 
   // Handlers
   const updateComparisonLabel = (id: string, label: string) => {
@@ -370,29 +643,78 @@ export default function App() {
   };
 
   const startDemo = () => {
-    // Mock demo data
-    const demoData: ProcessedDataRow[] = Array.from({ length: 40 }, (_, i) => {
-      const isCapped = i > 35;
-      const flags = isCapped ? ['Capped APTT value (>= 139.0)'] : [];
-      return {
-        id: `demo-${i}`,
-        year: 2025,
-        xa: 0.1 + Math.random() * 1.2,
-        apttCurrent: 40 + (i * 2) + Math.random() * 5,
-        apttNew: isCapped ? 140 : 42 + (i * 2.1) + Math.random() * 5,
+    // Mock demo data across 3 years with linked lots
+    const demoData: ProcessedDataRow[] = [];
+    
+    // Year 2023: Lot A vs Lot B
+    for (let i = 0; i < 20; i++) {
+      const xa = 0.1 + Math.random() * 1.2;
+      demoData.push({
+        id: `demo-2023-${i}`,
+        year: 2023,
+        xa: xa,
+        apttCurrent: 30 + (xa * 35) + Math.random() * 4,
+        apttNew: 32 + (xa * 36) + Math.random() * 4,
+        currentLotId: 'LOT-A',
+        newLotId: 'LOT-B',
         excluded: false,
-        flags: flags,
+        flags: [],
         isHeaderDuplicate: false,
         isUsable: true,
         rawValues: {}
-      };
-    });
+      });
+    }
+
+    // Year 2024: Lot B vs Lot C (Linked!)
+    for (let i = 0; i < 20; i++) {
+      const xa = 0.1 + Math.random() * 1.2;
+      demoData.push({
+        id: `demo-2024-${i}`,
+        year: 2024,
+        xa: xa,
+        apttCurrent: 32 + (xa * 36) + Math.random() * 4,
+        apttNew: 35 + (xa * 38) + Math.random() * 4,
+        currentLotId: 'LOT-B',
+        newLotId: 'LOT-C',
+        excluded: false,
+        flags: [],
+        isHeaderDuplicate: false,
+        isUsable: true,
+        rawValues: {}
+      });
+    }
+
+    // Year 2025: Lot C vs Lot D (Linked!)
+    for (let i = 0; i < 20; i++) {
+      const xa = 0.1 + Math.random() * 1.2;
+      const isCapped = i > 17; // Fewer capped values for better demo
+      const apttNewBase = 35 + (xa * 38) + Math.random() * 4;
+      demoData.push({
+        id: `demo-2025-${i}`,
+        year: 2025,
+        xa: xa,
+        apttCurrent: 35 + (xa * 38) + Math.random() * 4,
+        apttNew: isCapped ? 140 : apttNewBase,
+        currentLotId: 'LOT-C',
+        newLotId: 'LOT-D',
+        excluded: false,
+        flags: isCapped ? ['Capped APTT value (>= 139.0)'] : [],
+        isHeaderDuplicate: false,
+        isUsable: true,
+        rawValues: {}
+      });
+    }
+
     setRawData(demoData);
     const { comparisons: detected, updatedData } = detectComparisons(demoData);
     setRawData(updatedData);
+    setAnalysisConfig(prev => ({
+      ...prev,
+      currentApprovedRange: { lower: 40, upper: 55 }
+    }));
     setFileSummary({
-      totalRows: 40,
-      usableRows: 40,
+      totalRows: 60,
+      usableRows: 60,
       flaggedRows: 4,
       excludedRows: 0,
       issueCounts: {
@@ -402,7 +724,7 @@ export default function App() {
         cappedValues: 4
       },
       missingRequiredColumns: [],
-      detectedColumns: ['Year', 'Xa', 'APTT New Lot', 'APTT Current Lot'],
+      detectedColumns: ['Year', 'Xa', 'APTT New Lot', 'APTT Current Lot', 'New Lot ID', 'Current Lot ID'],
       hasRequiredColumns: true
     });
     setSetupStep('config');
@@ -413,8 +735,12 @@ export default function App() {
     // Simulate processing time
     await new Promise(resolve => setTimeout(resolve, 1500));
     
-    const res = await runAnalysis(rawData, analysisConfig, comparisons);
-    setResults(res);
+    const resWithMU = await runAnalysis(rawData, { ...analysisConfig, includeMU: true }, comparisons);
+    const resWithoutMU = await runAnalysis(rawData, { ...analysisConfig, includeMU: false }, comparisons);
+    
+    setResults(resWithMU);
+    setResultsNoMU(resWithoutMU);
+    setSimulatedRange(resWithMU.proposedRange);
     setIsAnalyzing(false);
     setAppState('dashboard');
   };
@@ -1398,7 +1724,20 @@ export default function App() {
                           </div>
 
                           <div className="space-y-2">
-                            <p className="text-[10px] font-bold text-black/40 uppercase tracking-tighter">MU Configuration</p>
+                            <div className="flex items-center justify-between">
+                              <p className="text-[10px] font-bold text-black/40 uppercase tracking-tighter">MU Configuration</p>
+                              <button 
+                                onClick={() => setAnalysisConfig(prev => ({ ...prev, includeMU: !prev.includeMU }))}
+                                className={cn(
+                                  "px-2 py-1 rounded-lg text-[8px] font-bold uppercase tracking-widest transition-all border",
+                                  analysisConfig.includeMU 
+                                    ? "bg-blue-50 border-blue-200 text-blue-700" 
+                                    : "bg-slate-50 border-slate-200 text-slate-500"
+                                )}
+                              >
+                                {analysisConfig.includeMU ? 'MU Enabled' : 'MU Disabled'}
+                              </button>
+                            </div>
                             <div className="grid grid-cols-3 gap-2">
                               {['xa', 'apttCurrent', 'apttNew'].map(key => (
                                 <div key={key} className="bg-white/50 p-2 rounded-xl border border-black/5 text-center">
@@ -1503,28 +1842,69 @@ export default function App() {
                   <h2 className="text-4xl font-semibold tracking-tight">Analysis Dashboard</h2>
                 </div>
 
-                <div className="flex bg-white rounded-2xl p-1 border border-black/5 shadow-sm">
-                  <button 
-                    onClick={() => setDashboardTab('executive')}
-                    className={cn(
-                      "px-6 py-2 rounded-xl text-xs font-bold transition-all",
-                      dashboardTab === 'executive' ? "bg-black text-white shadow-md" : "text-black/40 hover:text-black"
-                    )}
-                  >
-                    Executive
-                  </button>
-                  <button 
-                    onClick={() => setDashboardTab('technical')}
-                    className={cn(
-                      "px-6 py-2 rounded-xl text-xs font-bold transition-all",
-                      dashboardTab === 'technical' ? "bg-black text-white shadow-md" : "text-black/40 hover:text-black"
-                    )}
-                  >
-                    Technical
-                  </button>
+                <div className="flex items-center gap-4">
+                  <div className="flex bg-white rounded-2xl p-1 border border-black/5 shadow-sm">
+                    <button 
+                      onClick={() => setUseMU(true)}
+                      className={cn(
+                        "px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center gap-2",
+                        useMU ? "bg-blue-600 text-white shadow-md" : "text-black/40 hover:text-black"
+                      )}
+                    >
+                      <FlaskConical size={14} /> MU-Aware
+                    </button>
+                    <button 
+                      onClick={() => setUseMU(false)}
+                      className={cn(
+                        "px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all flex items-center gap-2",
+                        !useMU ? "bg-slate-600 text-white shadow-md" : "text-black/40 hover:text-black"
+                      )}
+                    >
+                      <TrendingUp size={14} /> Standard
+                    </button>
+                  </div>
+
+                  <div className="flex bg-white rounded-2xl p-1 border border-black/5 shadow-sm">
+                    <button 
+                      onClick={() => setDashboardTab('executive')}
+                      className={cn(
+                        "px-6 py-2 rounded-xl text-xs font-bold transition-all",
+                        dashboardTab === 'executive' ? "bg-black text-white shadow-md" : "text-black/40 hover:text-black"
+                      )}
+                    >
+                      Executive
+                    </button>
+                    <button 
+                      onClick={() => setDashboardTab('technical')}
+                      className={cn(
+                        "px-6 py-2 rounded-xl text-xs font-bold transition-all",
+                        dashboardTab === 'technical' ? "bg-black text-white shadow-md" : "text-black/40 hover:text-black"
+                      )}
+                    >
+                      Technical
+                    </button>
+                    <button 
+                      onClick={() => setDashboardTab('comparison')}
+                      className={cn(
+                        "px-6 py-2 rounded-xl text-xs font-bold transition-all",
+                        dashboardTab === 'comparison' ? "bg-black text-white shadow-md" : "text-black/40 hover:text-black"
+                      )}
+                    >
+                      MU Impact
+                    </button>
+                  </div>
                 </div>
                 
                 <div className="flex items-center gap-3">
+                  <button 
+                    onClick={() => setShowSimulation(!showSimulation)}
+                    className={cn(
+                      "bg-white border border-black/10 hover:border-black/20 text-black font-semibold py-3 px-6 rounded-2xl transition-all flex items-center gap-2",
+                      showSimulation && "bg-black text-white border-black"
+                    )}
+                  >
+                    <Beaker size={20} /> Simulation
+                  </button>
                   <button className="bg-white border border-black/10 hover:border-black/20 text-black font-semibold py-3 px-6 rounded-2xl transition-all flex items-center gap-2">
                     <Download size={20} /> Export CSV
                   </button>
@@ -1534,17 +1914,168 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Simulation Tool Panel */}
+              <AnimatePresence>
+                {showSimulation && results && simulatedRange && simulatedResults && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -20 }}
+                    className="mb-8 bg-black text-white rounded-[32px] p-8 shadow-2xl relative overflow-hidden"
+                  >
+                    {/* Background Accent */}
+                    <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
+                    
+                    <div className="relative z-10 space-y-8">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h3 className="text-2xl font-semibold tracking-tight">Range Simulation Engine</h3>
+                          <p className="text-xs text-white/40 uppercase font-bold tracking-widest mt-1">Real-time Impact Analysis</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => setSimulatedRange(analysisConfig.currentApprovedRange)}
+                            className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors"
+                          >
+                            Reset to Current
+                          </button>
+                          <button 
+                            onClick={() => activeResults && setSimulatedRange(activeResults.proposedRange)}
+                            className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors"
+                          >
+                            Reset to Proposed
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+                        {/* Controls */}
+                        <div className="lg:col-span-1 space-y-6">
+                          <div className="space-y-4">
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-white/40">Simulated Lower Limit</label>
+                            <div className="flex items-center gap-4">
+                              <input 
+                                type="range" 
+                                min="40" 
+                                max="80" 
+                                step="1"
+                                value={simulatedRange.lower}
+                                onChange={(e) => setSimulatedRange({ ...simulatedRange, lower: parseInt(e.target.value) })}
+                                className="flex-1 accent-emerald-500"
+                              />
+                              <span className="text-2xl font-mono font-bold w-12">{simulatedRange.lower}</span>
+                            </div>
+                          </div>
+                          <div className="space-y-4">
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-white/40">Simulated Upper Limit</label>
+                            <div className="flex items-center gap-4">
+                              <input 
+                                type="range" 
+                                min="80" 
+                                max="130" 
+                                step="1"
+                                value={simulatedRange.upper}
+                                onChange={(e) => setSimulatedRange({ ...simulatedRange, upper: parseInt(e.target.value) })}
+                                className="flex-1 accent-emerald-500"
+                              />
+                              <span className="text-2xl font-mono font-bold w-12">{simulatedRange.upper}</span>
+                            </div>
+                          </div>
+                          <div className="pt-4 border-t border-white/10">
+                            <div className="flex justify-between text-xs">
+                              <span className="text-white/40">Simulated Width</span>
+                              <span className="font-bold">{simulatedResults.width}s</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Metrics */}
+                        <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-6">
+                          <div className="bg-white/5 rounded-2xl p-6 space-y-4">
+                            <h4 className="text-[10px] font-bold uppercase tracking-widest text-white/40">Misclassification</h4>
+                            <div className="text-4xl font-bold">{simulatedResults.rate}%</div>
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[10px] uppercase tracking-widest">
+                                <span className="text-white/40">vs Current</span>
+                                <span className={cn("font-bold", simulatedResults.vsCurrent.improvement >= 0 ? "text-emerald-400" : "text-red-400")}>
+                                  {simulatedResults.vsCurrent.improvement > 0 ? '+' : ''}{simulatedResults.vsCurrent.improvement}%
+                                </span>
+                              </div>
+                              <div className="flex justify-between text-[10px] uppercase tracking-widest">
+                                <span className="text-white/40">vs Proposed</span>
+                                <span className={cn("font-bold", simulatedResults.vsProposed.improvement >= 0 ? "text-emerald-400" : "text-red-400")}>
+                                  {simulatedResults.vsProposed.improvement > 0 ? '+' : ''}{simulatedResults.vsProposed.improvement}%
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="bg-white/5 rounded-2xl p-6 space-y-4">
+                            <h4 className="text-[10px] font-bold uppercase tracking-widest text-white/40">Weighted Risk</h4>
+                            <div className="text-4xl font-bold">{simulatedResults.weightedScore}</div>
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[10px] uppercase tracking-widest">
+                                <span className="text-white/40">vs Current</span>
+                                <span className={cn("font-bold", simulatedResults.vsCurrent.weightedImprovement >= 0 ? "text-emerald-400" : "text-red-400")}>
+                                  {simulatedResults.vsCurrent.weightedImprovement > 0 ? '+' : ''}{simulatedResults.vsCurrent.weightedImprovement.toFixed(1)}
+                                </span>
+                              </div>
+                              <div className="flex justify-between text-[10px] uppercase tracking-widest">
+                                <span className="text-white/40">vs Proposed</span>
+                                <span className={cn("font-bold", simulatedResults.vsProposed.weightedImprovement >= 0 ? "text-emerald-400" : "text-red-400")}>
+                                  {simulatedResults.vsProposed.weightedImprovement > 0 ? '+' : ''}{simulatedResults.vsProposed.weightedImprovement.toFixed(1)}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="bg-white/5 rounded-2xl p-4 overflow-hidden">
+                            <ConfusionMatrixTable title="Simulated Matrix" data={simulatedResults.matrix} />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="pt-8 border-t border-white/10 flex items-center justify-between">
+                        <div className="flex items-center gap-3 text-white/40">
+                          <AlertCircle size={16} />
+                          <p className="text-[10px] font-bold uppercase tracking-widest">Simulation does not affect the official report unless confirmed</p>
+                        </div>
+                        <button 
+                          onClick={() => {
+                            if (useMU && results) {
+                              setResults({
+                                ...results,
+                                proposedRange: simulatedRange
+                              });
+                            } else if (!useMU && resultsNoMU) {
+                              setResultsNoMU({
+                                ...resultsNoMU,
+                                proposedRange: simulatedRange
+                              });
+                            }
+                            setShowSimulation(false);
+                          }}
+                          className="px-8 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-bold text-sm transition-all shadow-lg shadow-emerald-900/20"
+                        >
+                          Confirm for Reporting
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {/* Main Content Area */}
               {dashboardTab === 'executive' ? (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                   {/* Stability Banner */}
-                  {results?.warnings && results.warnings.length > 0 && (
+                  {activeResults?.warnings && activeResults.warnings.length > 0 && (
                     <div className="lg:col-span-3 bg-amber-50 border border-amber-200 rounded-2xl p-4 flex gap-4 items-start">
                       <AlertTriangle className="text-amber-600 shrink-0" size={20} />
                       <div className="space-y-1">
                         <h5 className="text-sm font-bold text-amber-900">Analysis Stability Warnings</h5>
                         <ul className="text-xs text-amber-800 list-disc list-inside space-y-0.5">
-                          {results.warnings.map((warning, idx) => (
+                          {activeResults.warnings.map((warning, idx) => (
                             <li key={idx}>{warning}</li>
                           ))}
                         </ul>
@@ -1555,9 +2086,9 @@ export default function App() {
                   {/* Executive Decision Card */}
                   <div className={cn(
                     "lg:col-span-2 p-8 rounded-[32px] border shadow-sm flex flex-col justify-between min-h-[320px]",
-                    results?.decision === 'No change' ? "bg-emerald-50 border-emerald-100" :
-                    results?.decision === 'Minor change' ? "bg-amber-50 border-amber-100" :
-                    results?.decision === 'Major change' ? "bg-red-50 border-red-100" :
+                    activeResults?.decision === 'No change' ? "bg-emerald-50 border-emerald-100" :
+                    activeResults?.decision === 'Minor change' ? "bg-amber-50 border-amber-100" :
+                    activeResults?.decision === 'Major change' ? "bg-red-50 border-red-100" :
                     "bg-slate-50 border-slate-100"
                   )}>
                     <div>
@@ -1565,21 +2096,21 @@ export default function App() {
                         <div className="flex items-center gap-3">
                           <div className={cn(
                             "w-4 h-4 rounded-full animate-pulse",
-                            results?.decision === 'No change' ? "bg-emerald-500" :
-                            results?.decision === 'Minor change' ? "bg-amber-500" :
-                            results?.decision === 'Major change' ? "bg-red-500" :
+                            activeResults?.decision === 'No change' ? "bg-emerald-500" :
+                            activeResults?.decision === 'Minor change' ? "bg-amber-500" :
+                            activeResults?.decision === 'Major change' ? "bg-red-500" :
                             "bg-slate-500"
                           )} />
                           <span className="text-xs font-bold uppercase tracking-widest opacity-60">Executive Recommendation</span>
                         </div>
                         <div className="px-4 py-1.5 bg-white/60 backdrop-blur-sm rounded-full border border-black/5 text-[10px] font-bold uppercase tracking-widest">
-                          {results?.confidence}
+                          {activeResults?.confidence}
                         </div>
                       </div>
                       
-                      <h3 className="text-6xl font-semibold mb-6 tracking-tight">{results?.decision}</h3>
+                      <h3 className="text-6xl font-semibold mb-6 tracking-tight">{activeResults?.decision}</h3>
                       <p className="text-lg text-black/70 leading-relaxed max-w-2xl">
-                        {results?.interpretation}
+                        {activeResults?.interpretation}
                       </p>
                     </div>
                     
@@ -1611,7 +2142,7 @@ export default function App() {
                         <div className="flex items-center justify-between">
                           <span className="text-sm font-bold text-emerald-600">Proposed New</span>
                           <div className="text-right">
-                            <p className="text-4xl font-semibold text-emerald-700">{results?.proposedRange.lower} – {results?.proposedRange.upper}</p>
+                            <p className="text-4xl font-semibold text-emerald-700">{activeResults?.proposedRange.lower} – {activeResults?.proposedRange.upper}</p>
                             <p className="text-[10px] font-bold text-emerald-600/40 uppercase">Seconds</p>
                           </div>
                         </div>
@@ -1621,20 +2152,20 @@ export default function App() {
                     <div className="bg-[#F5F5F4] p-4 rounded-2xl space-y-3">
                       <div className="flex justify-between text-xs">
                         <span className="text-black/40">Lower Shift</span>
-                        <span className={cn("font-bold", (results?.shifts.lower || 0) > 0 ? "text-red-600" : "text-emerald-600")}>
-                          {results?.shifts.lower && results.shifts.lower > 0 ? '+' : ''}{results?.shifts.lower.toFixed(1)} sec
+                        <span className={cn("font-bold", (activeResults?.shifts.lower || 0) > 0 ? "text-red-600" : "text-emerald-600")}>
+                          {activeResults?.shifts.lower && activeResults.shifts.lower > 0 ? '+' : ''}{activeResults?.shifts.lower.toFixed(1)} sec
                         </span>
                       </div>
                       <div className="flex justify-between text-xs">
                         <span className="text-black/40">Upper Shift</span>
-                        <span className={cn("font-bold", (results?.shifts.upper || 0) > 0 ? "text-red-600" : "text-emerald-600")}>
-                          {results?.shifts.upper && results.shifts.upper > 0 ? '+' : ''}{results?.shifts.upper.toFixed(1)} sec
+                        <span className={cn("font-bold", (activeResults?.shifts.upper || 0) > 0 ? "text-red-600" : "text-emerald-600")}>
+                          {activeResults?.shifts.upper && activeResults.shifts.upper > 0 ? '+' : ''}{activeResults?.shifts.upper.toFixed(1)} sec
                         </span>
                       </div>
                       <div className="flex justify-between text-xs">
                         <span className="text-black/40">Width Shift</span>
-                        <span className={cn("font-bold", (results?.shifts.width || 0) > 0 ? "text-red-600" : "text-emerald-600")}>
-                          {results?.shifts.width && results.shifts.width > 0 ? '+' : ''}{results?.shifts.width.toFixed(1)} sec
+                        <span className={cn("font-bold", (activeResults?.shifts.width || 0) > 0 ? "text-red-600" : "text-emerald-600")}>
+                          {activeResults?.shifts.width && activeResults.shifts.width > 0 ? '+' : ''}{activeResults?.shifts.width.toFixed(1)} sec
                         </span>
                       </div>
                     </div>
@@ -1647,30 +2178,30 @@ export default function App() {
                         <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Misclassification Risk</h4>
                         <span className={cn(
                           "text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full",
-                          results?.misclassification.improvement! > 0 ? "bg-emerald-100 text-emerald-700" : 
-                          results?.misclassification.improvement! < 0 ? "bg-red-100 text-red-700" : 
+                          activeResults?.misclassification.improvement! > 0 ? "bg-emerald-100 text-emerald-700" : 
+                          activeResults?.misclassification.improvement! < 0 ? "bg-red-100 text-red-700" : 
                           "bg-slate-100 text-slate-600"
                         )}>
-                          {results?.misclassification.improvement! > 0 ? 'Improved' : 
-                           results?.misclassification.improvement! < 0 ? 'Worsened' : 'Unchanged'}
+                          {activeResults?.misclassification.improvement! > 0 ? 'Improved' : 
+                           activeResults?.misclassification.improvement! < 0 ? 'Worsened' : 'Unchanged'}
                         </span>
                       </div>
                       
                       <div className="flex items-end gap-4 mb-8">
                         <div className="flex-1 space-y-2">
                           <div className="h-24 bg-slate-100 rounded-xl relative overflow-hidden">
-                            <div className="absolute bottom-0 w-full bg-slate-400 transition-all duration-1000" style={{ height: `${results?.misclassification.current.rate}%` }} />
+                            <div className="absolute bottom-0 w-full bg-slate-400 transition-all duration-1000" style={{ height: `${activeResults?.misclassification.current.rate}%` }} />
                             <div className="absolute inset-0 flex items-center justify-center">
-                              <span className="text-xs font-bold text-black/40">{results?.misclassification.current.rate}%</span>
+                              <span className="text-xs font-bold text-black/40">{activeResults?.misclassification.current.rate}%</span>
                             </div>
                           </div>
                           <p className="text-[10px] font-bold text-center uppercase tracking-tighter opacity-40">Current</p>
                         </div>
                         <div className="flex-1 space-y-2">
                           <div className="h-24 bg-emerald-50 rounded-xl relative overflow-hidden">
-                            <div className="absolute bottom-0 w-full bg-emerald-500 transition-all duration-1000" style={{ height: `${results?.misclassification.proposed.rate}%` }} />
+                            <div className="absolute bottom-0 w-full bg-emerald-500 transition-all duration-1000" style={{ height: `${activeResults?.misclassification.proposed.rate}%` }} />
                             <div className="absolute inset-0 flex items-center justify-center">
-                              <span className="text-xs font-bold text-emerald-700">{results?.misclassification.proposed.rate}%</span>
+                              <span className="text-xs font-bold text-emerald-700">{activeResults?.misclassification.proposed.rate}%</span>
                             </div>
                           </div>
                           <p className="text-[10px] font-bold text-center uppercase tracking-tighter text-emerald-600">Proposed</p>
@@ -1678,10 +2209,10 @@ export default function App() {
                       </div>
                       
                       <p className="text-sm text-black/60 leading-relaxed">
-                        {results?.misclassification.improvement! > 0 ? (
-                          <>The proposed range reduces overall misclassification risk by <span className="font-bold text-emerald-600">{results?.misclassification.improvement}%</span>.</>
-                        ) : results?.misclassification.improvement! < 0 ? (
-                          <>The proposed range increases misclassification risk by <span className="font-bold text-red-600">{Math.abs(results?.misclassification.improvement!)}%</span>.</>
+                        {activeResults?.misclassification.improvement! > 0 ? (
+                          <>The proposed range reduces overall misclassification risk by <span className="font-bold text-emerald-600">{activeResults?.misclassification.improvement}%</span>.</>
+                        ) : activeResults?.misclassification.improvement! < 0 ? (
+                          <>The proposed range increases misclassification risk by <span className="font-bold text-red-600">{Math.abs(activeResults?.misclassification.improvement!)}%</span>.</>
                         ) : (
                           <>The proposed range maintains the existing misclassification risk level.</>
                         )}
@@ -1697,7 +2228,7 @@ export default function App() {
 
                   {/* Advanced Misclassification Panel */}
                   <AnimatePresence>
-                    {showConfusionMatrix && results && (
+                    {showConfusionMatrix && activeResults && (
                       <motion.div 
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
@@ -1714,11 +2245,11 @@ export default function App() {
                               <p className="text-[10px] font-bold text-black/30 uppercase tracking-widest mb-1">Weighted Risk Improvement</p>
                               <p className={cn(
                                 "text-2xl font-bold",
-                                results.misclassification.weightedImprovement > 0 ? "text-emerald-600" : 
-                                results.misclassification.weightedImprovement < 0 ? "text-red-600" : "text-black/40"
+                                activeResults.misclassification.weightedImprovement > 0 ? "text-emerald-600" : 
+                                activeResults.misclassification.weightedImprovement < 0 ? "text-red-600" : "text-black/40"
                               )}>
-                                {results.misclassification.weightedImprovement > 0 ? '+' : ''}
-                                {results.misclassification.weightedImprovement.toFixed(1)}
+                                {activeResults.misclassification.weightedImprovement > 0 ? '+' : ''}
+                                {activeResults.misclassification.weightedImprovement.toFixed(1)}
                               </p>
                             </div>
                           </div>
@@ -1727,21 +2258,21 @@ export default function App() {
                             <div className="space-y-6">
                               <ConfusionMatrixTable 
                                 title="Current Approved Range" 
-                                data={results.misclassification.current.matrix} 
+                                data={activeResults.misclassification.current.matrix} 
                               />
                               <div className="bg-[#F5F5F4] p-4 rounded-2xl flex justify-between items-center">
                                 <span className="text-[10px] font-bold uppercase tracking-widest text-black/40">Weighted Risk Score</span>
-                                <span className="text-lg font-bold">{results.misclassification.current.weightedScore}</span>
+                                <span className="text-lg font-bold">{activeResults.misclassification.current.weightedScore}</span>
                               </div>
                             </div>
                             <div className="space-y-6">
                               <ConfusionMatrixTable 
                                 title="Proposed New Range" 
-                                data={results.misclassification.proposed.matrix} 
+                                data={activeResults.misclassification.proposed.matrix} 
                               />
                               <div className="bg-emerald-50 p-4 rounded-2xl flex justify-between items-center">
                                 <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600/60">Weighted Risk Score</span>
-                                <span className="text-lg font-bold text-emerald-700">{results.misclassification.proposed.weightedScore}</span>
+                                <span className="text-lg font-bold text-emerald-700">{activeResults.misclassification.proposed.weightedScore}</span>
                               </div>
                             </div>
                           </div>
@@ -1768,15 +2299,15 @@ export default function App() {
                       <div className="space-y-4">
                         <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Current Lot</p>
                         <div className="space-y-1">
-                          <p className="text-lg font-semibold">{results?.currentLotPredicted.lower} – {results?.currentLotPredicted.upper}</p>
-                          <p className="text-[10px] text-black/40 uppercase font-bold tracking-tighter">Width: {results?.currentLotPredicted.width}s</p>
+                          <p className="text-lg font-semibold">{activeResults?.currentLotPredicted.lower} – {activeResults?.currentLotPredicted.upper}</p>
+                          <p className="text-[10px] text-black/40 uppercase font-bold tracking-tighter">Width: {activeResults?.currentLotPredicted.width}s</p>
                         </div>
                       </div>
                       <div className="space-y-4">
                         <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-600/60">New Lot</p>
                         <div className="space-y-1">
-                          <p className="text-lg font-semibold text-emerald-700">{results?.newLotPredicted.lower} – {results?.newLotPredicted.upper}</p>
-                          <p className="text-[10px] text-emerald-600/40 uppercase font-bold tracking-tighter">Width: {results?.newLotPredicted.width}s</p>
+                          <p className="text-lg font-semibold text-emerald-700">{activeResults?.newLotPredicted.lower} – {activeResults?.newLotPredicted.upper}</p>
+                          <p className="text-[10px] text-emerald-600/40 uppercase font-bold tracking-tighter">Width: {activeResults?.newLotPredicted.width}s</p>
                         </div>
                       </div>
                     </div>
@@ -1791,7 +2322,7 @@ export default function App() {
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
                     <div className="flex justify-between items-start">
                       <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Bootstrap Uncertainty (95% CI)</h4>
-                      <span className="text-[10px] font-bold text-black/30 uppercase tracking-widest">{results?.uncertainty.iterations} Iterations</span>
+                      <span className="text-[10px] font-bold text-black/30 uppercase tracking-widest">{activeResults?.uncertainty.iterations} Iterations</span>
                     </div>
                     
                     <div className="grid grid-cols-1 gap-6">
@@ -1803,15 +2334,15 @@ export default function App() {
                         <div className="space-y-4">
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-medium text-black/60">Lower Limit</span>
-                            <span className="text-sm font-bold">{results?.uncertainty.lowerInterval[0].toFixed(1)} – {results?.uncertainty.lowerInterval[1].toFixed(1)}s</span>
+                            <span className="text-sm font-bold">{activeResults?.uncertainty.lowerInterval[0].toFixed(1)} – {activeResults?.uncertainty.lowerInterval[1].toFixed(1)}s</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-medium text-black/60">Upper Limit</span>
-                            <span className="text-sm font-bold">{results?.uncertainty.upperInterval[0].toFixed(1)} – {results?.uncertainty.upperInterval[1].toFixed(1)}s</span>
+                            <span className="text-sm font-bold">{activeResults?.uncertainty.upperInterval[0].toFixed(1)} – {activeResults?.uncertainty.upperInterval[1].toFixed(1)}s</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-medium text-black/60">Therapeutic Width</span>
-                            <span className="text-sm font-bold">{results?.uncertainty.widthInterval[0].toFixed(1)} – {results?.uncertainty.widthInterval[1].toFixed(1)}s</span>
+                            <span className="text-sm font-bold">{activeResults?.uncertainty.widthInterval[0].toFixed(1)} – {activeResults?.uncertainty.widthInterval[1].toFixed(1)}s</span>
                           </div>
                         </div>
                       </div>
@@ -1821,15 +2352,15 @@ export default function App() {
                         <div className="space-y-4">
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-medium text-black/60">Lower Shift</span>
-                            <span className="text-sm font-bold">{results?.uncertainty.lowerShiftInterval[0] > 0 ? '+' : ''}{results?.uncertainty.lowerShiftInterval[0]} to {results?.uncertainty.lowerShiftInterval[1] > 0 ? '+' : ''}{results?.uncertainty.lowerShiftInterval[1]}s</span>
+                            <span className="text-sm font-bold">{activeResults?.uncertainty.lowerShiftInterval[0] > 0 ? '+' : ''}{activeResults?.uncertainty.lowerShiftInterval[0]} to {activeResults?.uncertainty.lowerShiftInterval[1] > 0 ? '+' : ''}{activeResults?.uncertainty.lowerShiftInterval[1]}s</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-medium text-black/60">Upper Shift</span>
-                            <span className="text-sm font-bold">{results?.uncertainty.upperShiftInterval[0] > 0 ? '+' : ''}{results?.uncertainty.upperShiftInterval[0]} to {results?.uncertainty.upperShiftInterval[1] > 0 ? '+' : ''}{results?.uncertainty.upperShiftInterval[1]}s</span>
+                            <span className="text-sm font-bold">{activeResults?.uncertainty.upperShiftInterval[0] > 0 ? '+' : ''}{activeResults?.uncertainty.upperShiftInterval[0]} to {activeResults?.uncertainty.upperShiftInterval[1] > 0 ? '+' : ''}{activeResults?.uncertainty.upperShiftInterval[1]}s</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-medium text-black/60">Width Shift</span>
-                            <span className="text-sm font-bold">{results?.uncertainty.widthShiftInterval[0] > 0 ? '+' : ''}{results?.uncertainty.widthShiftInterval[0]} to {results?.uncertainty.widthShiftInterval[1] > 0 ? '+' : ''}{results?.uncertainty.widthShiftInterval[1]}s</span>
+                            <span className="text-sm font-bold">{activeResults?.uncertainty.widthShiftInterval[0] > 0 ? '+' : ''}{activeResults?.uncertainty.widthShiftInterval[0]} to {activeResults?.uncertainty.widthShiftInterval[1] > 0 ? '+' : ''}{activeResults?.uncertainty.widthShiftInterval[1]}s</span>
                           </div>
                         </div>
                       </div>
@@ -1874,22 +2405,22 @@ export default function App() {
                             <div className="relative">
                               <div className="flex justify-between items-center mb-2">
                                 <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600/60">Proposed New (with 95% CI)</span>
-                                <span className="text-xs font-bold text-emerald-700">{results?.proposedRange.lower} – {results?.proposedRange.upper}s</span>
+                                <span className="text-xs font-bold text-emerald-700">{activeResults?.proposedRange.lower} – {activeResults?.proposedRange.upper}s</span>
                               </div>
                               <div className="h-4 bg-emerald-50 rounded-full relative">
                                 {/* Confidence Intervals (Shadows) */}
                                 <div 
                                   className="absolute h-8 -top-2 bg-emerald-200/30 rounded-sm blur-[2px]" 
                                   style={{ 
-                                    left: `${(results?.uncertainty.lowerInterval[0]! / finalMax) * 100}%`, 
-                                    width: `${((results?.uncertainty.lowerInterval[1]! - results?.uncertainty.lowerInterval[0]!) / finalMax) * 100}%` 
+                                    left: `${(activeResults?.uncertainty.lowerInterval[0]! / finalMax) * 100}%`, 
+                                    width: `${((activeResults?.uncertainty.lowerInterval[1]! - activeResults?.uncertainty.lowerInterval[0]!) / finalMax) * 100}%` 
                                   }} 
                                 />
                                 <div 
                                   className="absolute h-8 -top-2 bg-emerald-200/30 rounded-sm blur-[2px]" 
                                   style={{ 
-                                    left: `${(results?.uncertainty.upperInterval[0]! / finalMax) * 100}%`, 
-                                    width: `${((results?.uncertainty.upperInterval[1]! - results?.uncertainty.upperInterval[0]!) / finalMax) * 100}%` 
+                                    left: `${(activeResults?.uncertainty.upperInterval[0]! / finalMax) * 100}%`, 
+                                    width: `${((activeResults?.uncertainty.upperInterval[1]! - activeResults?.uncertainty.upperInterval[0]!) / finalMax) * 100}%` 
                                   }} 
                                 />
                                 
@@ -1897,8 +2428,8 @@ export default function App() {
                                 <div 
                                   className="absolute h-full bg-emerald-500" 
                                   style={{ 
-                                    left: `${(results?.proposedRange.lower! / finalMax) * 100}%`, 
-                                    width: `${((results?.proposedRange.upper! - results?.proposedRange.lower!) / finalMax) * 100}%` 
+                                    left: `${(activeResults?.proposedRange.lower! / finalMax) * 100}%`, 
+                                    width: `${((activeResults?.proposedRange.upper! - activeResults?.proposedRange.lower!) / finalMax) * 100}%` 
                                   }} 
                                 />
                               </div>
@@ -1918,11 +2449,25 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Key Visual Placeholder */}
-                  <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm flex flex-col items-center justify-center text-center">
-                    <BarChart3 size={48} className="text-black/10 mb-4" />
-                    <h4 className="text-sm font-semibold mb-2">Regression Visualization</h4>
-                    <p className="text-xs text-black/40 max-w-[200px]">Interactive Deming regression plot with confidence bands will be rendered here.</p>
+                  {/* Regression Visualization */}
+                  <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm">
+                    <div className="flex items-center justify-between mb-8">
+                      <div>
+                        <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Regression Analysis</h4>
+                        <p className="text-xs text-black/40">Correlation between Anti-Xa and New Lot APTT.</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-bold text-black/30 uppercase tracking-widest mb-1">Correlation (R²)</p>
+                        <p className="text-xl font-bold text-black">{(activeResults?.regressionModel.r2 || 0).toFixed(3)}</p>
+                      </div>
+                    </div>
+                    {activeResults && (
+                      <RegressionVisualization 
+                        data={rawData} 
+                        results={activeResults} 
+                        config={analysisConfig} 
+                      />
+                    )}
                   </div>
 
                   {/* Simulation Tool */}
@@ -1933,8 +2478,18 @@ export default function App() {
                         <p className="text-xs text-black/40">Adjust limits to see real-time impact on misclassification and risk.</p>
                       </div>
                       <div className="flex gap-2">
-                        <button className="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-[#F5F5F4] rounded-full hover:bg-black/5 transition-colors">Reset to Proposed</button>
-                        <button className="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-[#F5F5F4] rounded-full hover:bg-black/5 transition-colors">Reset to Current</button>
+                        <button 
+                          onClick={() => activeResults && setSimulatedRange(activeResults.proposedRange)}
+                          className="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-[#F5F5F4] rounded-full hover:bg-black/5 transition-colors"
+                        >
+                          Reset to Proposed
+                        </button>
+                        <button 
+                          onClick={() => setSimulatedRange(analysisConfig.currentApprovedRange)}
+                          className="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-[#F5F5F4] rounded-full hover:bg-black/5 transition-colors"
+                        >
+                          Reset to Current
+                        </button>
                       </div>
                     </div>
 
@@ -1943,8 +2498,8 @@ export default function App() {
                         <label className="text-[10px] uppercase font-bold text-black/40 block">Simulation Lower Limit</label>
                         <input 
                           type="number" 
-                          value={results?.proposedRange.lower}
-                          readOnly
+                          value={simulatedRange?.lower || activeResults?.proposedRange.lower}
+                          onChange={(e) => setSimulatedRange(prev => ({ ...prev!, lower: parseFloat(e.target.value) || 0 }))}
                           className="w-full bg-[#F5F5F4] border-none rounded-xl p-4 font-semibold text-xl focus:ring-2 focus:ring-emerald-500"
                         />
                       </div>
@@ -1952,25 +2507,31 @@ export default function App() {
                         <label className="text-[10px] uppercase font-bold text-black/40 block">Simulation Upper Limit</label>
                         <input 
                           type="number" 
-                          value={results?.proposedRange.upper}
-                          readOnly
+                          value={simulatedRange?.upper || activeResults?.proposedRange.upper}
+                          onChange={(e) => setSimulatedRange(prev => ({ ...prev!, upper: parseFloat(e.target.value) || 0 }))}
                           className="w-full bg-[#F5F5F4] border-none rounded-xl p-4 font-semibold text-xl focus:ring-2 focus:ring-emerald-500"
                         />
                       </div>
                       <div className="md:col-span-2 bg-emerald-50/50 p-6 rounded-2xl border border-emerald-100 flex items-center justify-between">
                         <div>
                           <p className="text-[10px] font-bold text-emerald-800 uppercase tracking-widest mb-1">Simulated Risk Score</p>
-                          <p className="text-3xl font-bold text-emerald-900">14.2 <span className="text-sm font-medium opacity-40">Weighted</span></p>
+                          <p className="text-3xl font-bold text-emerald-900">{simulatedResults?.weightedScore.toFixed(1)} <span className="text-sm font-medium opacity-40">Weighted</span></p>
                         </div>
                         <div className="text-right">
                           <p className="text-[10px] font-bold text-emerald-800 uppercase tracking-widest mb-1">Improvement</p>
-                          <p className="text-xl font-bold text-emerald-600">+5.1%</p>
+                          <p className={cn(
+                            "text-xl font-bold",
+                            (simulatedResults?.vsCurrent.weightedImprovement || 0) > 0 ? "text-emerald-600" : "text-red-600"
+                          )}>
+                            {(simulatedResults?.vsCurrent.weightedImprovement || 0) > 0 ? '+' : ''}
+                            {simulatedResults?.vsCurrent.weightedImprovement.toFixed(1)}%
+                          </p>
                         </div>
                       </div>
                     </div>
                   </div>
                 </div>
-              ) : (
+              ) : dashboardTab === 'technical' ? (
                 <div className="space-y-8">
                   {/* Technical Summary View */}
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
@@ -1978,11 +2539,11 @@ export default function App() {
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
                       <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Regression Engine</h4>
                       <div className="space-y-2">
-                        <p className="text-sm font-bold text-black">{results?.regressionMethod}</p>
+                        <p className="text-sm font-bold text-black">{activeResults?.regressionMethod}</p>
                         <p className="text-[10px] text-black/40 leading-relaxed">
-                          {results?.regressionMethod === 'Weighted Deming' 
+                          {activeResults?.regressionMethod === 'Weighted Deming' 
                             ? 'Weights assigned per-sample based on MU band configuration.' 
-                            : `Standard Deming used. ${results?.regressionReason || ''}`}
+                            : `Standard Deming used. ${activeResults?.regressionReason || ''}`}
                         </p>
                       </div>
                     </div>
@@ -1991,7 +2552,7 @@ export default function App() {
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
                       <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Row Counts by Comparison</h4>
                       <div className="space-y-3">
-                        {results?.summary.comparisons.map(c => (
+                        {activeResults?.summary.comparisons.map(c => (
                           <div key={c.id} className="flex justify-between items-center">
                             <span className={cn("text-xs", c.isPrimary ? "font-bold text-black" : "text-black/60")}>
                               {c.label} {c.isPrimary && "(Primary)"}
@@ -2008,15 +2569,15 @@ export default function App() {
                       <div className="space-y-3">
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Total Usable Rows</span>
-                          <span className="text-xs font-mono font-bold">{results?.summary.qc.totalUsable}</span>
+                          <span className="text-xs font-mono font-bold">{activeResults?.summary.qc.totalUsable}</span>
                         </div>
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Capped/Censored Values</span>
-                          <span className="text-xs font-mono font-bold text-amber-600">{results?.summary.qc.censoredCount}</span>
+                          <span className="text-xs font-mono font-bold text-amber-600">{activeResults?.summary.qc.censoredCount}</span>
                         </div>
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Flagged (but included)</span>
-                          <span className="text-xs font-mono font-bold text-amber-600">{results?.summary.qc.flaggedUsableCount}</span>
+                          <span className="text-xs font-mono font-bold text-amber-600">{activeResults?.summary.qc.flaggedUsableCount}</span>
                         </div>
                       </div>
                     </div>
@@ -2027,19 +2588,19 @@ export default function App() {
                       <div className="space-y-3">
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Mean Difference</span>
-                          <span className="text-xs font-mono font-bold">{results?.summary.differences.mean.toFixed(2)}s</span>
+                          <span className="text-xs font-mono font-bold">{activeResults?.summary.differences.mean.toFixed(2)}s</span>
                         </div>
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Median Difference</span>
-                          <span className="text-xs font-mono font-bold">{results?.summary.differences.median.toFixed(2)}s</span>
+                          <span className="text-xs font-mono font-bold">{activeResults?.summary.differences.median.toFixed(2)}s</span>
                         </div>
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Mean Absolute Diff</span>
-                          <span className="text-xs font-mono font-bold">{results?.summary.differences.absMean.toFixed(2)}s</span>
+                          <span className="text-xs font-mono font-bold">{activeResults?.summary.differences.absMean.toFixed(2)}s</span>
                         </div>
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Std Deviation (Diff)</span>
-                          <span className="text-xs font-mono font-bold">{results?.summary.differences.stdDev.toFixed(2)}s</span>
+                          <span className="text-xs font-mono font-bold">{activeResults?.summary.differences.stdDev.toFixed(2)}s</span>
                         </div>
                       </div>
                     </div>
@@ -2063,38 +2624,40 @@ export default function App() {
                         <tbody className="divide-y divide-black/5">
                           <tr>
                             <td className="px-8 py-4 text-xs font-bold text-black/60">Mean</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.xa.mean.toFixed(3)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttNew.mean.toFixed(1)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttCurrent.mean.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.xa.mean.toFixed(3)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttNew.mean.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttCurrent.mean.toFixed(1)}</td>
                           </tr>
                           <tr>
                             <td className="px-8 py-4 text-xs font-bold text-black/60">Median</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.xa.median.toFixed(3)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttNew.median.toFixed(1)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttCurrent.median.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.xa.median.toFixed(3)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttNew.median.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttCurrent.median.toFixed(1)}</td>
                           </tr>
                           <tr>
                             <td className="px-8 py-4 text-xs font-bold text-black/60">Min</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.xa.min.toFixed(3)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttNew.min.toFixed(1)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttCurrent.min.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.xa.min.toFixed(3)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttNew.min.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttCurrent.min.toFixed(1)}</td>
                           </tr>
                           <tr>
                             <td className="px-8 py-4 text-xs font-bold text-black/60">Max</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.xa.max.toFixed(3)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttNew.max.toFixed(1)}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttCurrent.max.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.xa.max.toFixed(3)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttNew.max.toFixed(1)}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttCurrent.max.toFixed(1)}</td>
                           </tr>
                           <tr>
                             <td className="px-8 py-4 text-xs font-bold text-black/60">N (Included)</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.xa.count}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttNew.count}</td>
-                            <td className="px-8 py-4 text-xs font-mono text-center">{results?.summary.apttCurrent.count}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.xa.count}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttNew.count}</td>
+                            <td className="px-8 py-4 text-xs font-mono text-center">{activeResults?.summary.apttCurrent.count}</td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
                   </div>
+
+                  {activeResults && <TemporalSignalPanel results={activeResults} />}
 
                   <div className="bg-amber-50 border border-amber-100 p-6 rounded-2xl flex gap-4">
                     <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center text-amber-600 shrink-0">
@@ -2106,6 +2669,109 @@ export default function App() {
                         The current analysis uses a modular architecture. Regression models and misclassification logic are currently using placeholder calculations 
                         while the core statistical engine is being finalised. Summary statistics above are calculated from the actual processed dataset.
                       </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {/* Side-by-Side Range Comparison */}
+                    <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-6">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Proposed Range Comparison</h4>
+                      <div className="grid grid-cols-2 gap-8">
+                        <div className="space-y-4">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-blue-600/60">MU-Aware (Weighted)</p>
+                          <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100">
+                            <p className="text-3xl font-bold text-blue-900">{results?.proposedRange.lower} – {results?.proposedRange.upper}s</p>
+                            <p className="text-[10px] font-bold text-blue-600/40 uppercase mt-1">Width: {(results!.proposedRange.upper - results!.proposedRange.lower).toFixed(1)}s</p>
+                          </div>
+                        </div>
+                        <div className="space-y-4">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-600/60">Standard (Unweighted)</p>
+                          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                            <p className="text-3xl font-bold text-slate-900">{resultsNoMU?.proposedRange.lower} – {resultsNoMU?.proposedRange.upper}s</p>
+                            <p className="text-[10px] font-bold text-slate-600/40 uppercase mt-1">Width: {(resultsNoMU!.proposedRange.upper - resultsNoMU!.proposedRange.lower).toFixed(1)}s</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="pt-6 border-t border-black/5">
+                        <p className="text-xs text-black/60 leading-relaxed">
+                          {(() => {
+                            const muWidth = results!.proposedRange.upper - results!.proposedRange.lower;
+                            const stdWidth = resultsNoMU!.proposedRange.upper - resultsNoMU!.proposedRange.lower;
+                            const diff = Math.abs(muWidth - stdWidth);
+                            const action = diff < 0.1 ? 'maintains a similar' : muWidth < stdWidth ? 'tightens the' : 'widens the';
+                            return (
+                              <>
+                                The MU-Aware engine {action} therapeutic range by <span className="font-bold">{diff.toFixed(1)}s</span> compared to standard analysis.
+                              </>
+                            );
+                          })()}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Risk Profile Comparison */}
+                    <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-6">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Risk Profile Comparison</h4>
+                      <div className="space-y-6">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm font-medium text-black/60">Weighted Risk Score (MU-Aware)</span>
+                          <span className="text-xl font-bold text-blue-600">{results?.misclassification.proposed.weightedScore}</span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm font-medium text-black/60">Weighted Risk Score (Standard)</span>
+                          <span className="text-xl font-bold text-slate-600">{resultsNoMU?.misclassification.proposed.weightedScore}</span>
+                        </div>
+                        <div className="pt-4 border-t border-black/5">
+                          <div className="flex items-center gap-2 text-emerald-600">
+                            <CheckCircle2 size={16} />
+                            <p className="text-xs font-bold uppercase tracking-widest">
+                              MU-Aware analysis provides a {((resultsNoMU!.misclassification.proposed.weightedScore - results!.misclassification.proposed.weightedScore) / resultsNoMU!.misclassification.proposed.weightedScore * 100).toFixed(1)}% safer risk profile.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Detailed Metrics Table */}
+                  <div className="bg-white rounded-[32px] border border-black/5 shadow-sm overflow-hidden">
+                    <div className="px-8 py-6 border-b border-black/5 bg-black/[0.01]">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-black/40">Comparative Metrics Audit</h4>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="bg-black/[0.02] border-b border-black/5">
+                            <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-black/40">Metric</th>
+                            <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">MU-Aware (Proposed)</th>
+                            <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Standard (Proposed)</th>
+                            <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Delta</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-black/5">
+                          {[
+                            { label: 'Lower Limit (s)', mu: results?.proposedRange.lower, std: resultsNoMU?.proposedRange.lower },
+                            { label: 'Upper Limit (s)', mu: results?.proposedRange.upper, std: resultsNoMU?.proposedRange.upper },
+                            { label: 'Range Width (s)', mu: results!.proposedRange.upper - results!.proposedRange.lower, std: resultsNoMU!.proposedRange.upper - resultsNoMU!.proposedRange.lower },
+                            { label: 'Misclassification Rate (%)', mu: results?.misclassification.proposed.rate, std: resultsNoMU?.misclassification.proposed.rate },
+                            { label: 'Weighted Risk Score', mu: results?.misclassification.proposed.weightedScore, std: resultsNoMU?.misclassification.proposed.weightedScore },
+                          ].map((row, i) => (
+                            <tr key={i}>
+                              <td className="px-8 py-4 text-xs font-bold text-black/60">{row.label}</td>
+                              <td className="px-8 py-4 text-xs font-mono text-center font-bold text-blue-600">{row.mu?.toFixed(1)}</td>
+                              <td className="px-8 py-4 text-xs font-mono text-center">{row.std?.toFixed(1)}</td>
+                              <td className={cn(
+                                "px-8 py-4 text-xs font-mono text-center font-bold",
+                                (row.mu! - row.std!) === 0 ? "text-black/20" : (row.mu! - row.std!) > 0 ? "text-red-500" : "text-emerald-500"
+                              )}>
+                                {(row.mu! - row.std!) > 0 ? '+' : ''}{(row.mu! - row.std!).toFixed(1)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
                 </div>
