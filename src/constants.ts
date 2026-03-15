@@ -11,20 +11,26 @@ export const DEFAULT_RISK_WEIGHTS = {
   supraToSub: 2.0,
 };
 
+export const DEFAULT_MU_UNITS = {
+  xa: 'SD' as const,
+  apttCurrent: 'CV%' as const,
+  apttNew: 'CV%' as const,
+};
+
 export const DEFAULT_MU_BANDS = (xaRange: { lower: number, upper: number }, apttRange: { lower: number, upper: number }) => ({
   xa: [
-    { lowerBound: 0, upperBound: xaRange.lower, value: 0.05, unit: 'SD' as const },
-    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 10, unit: 'CV%' as const },
-    { lowerBound: xaRange.upper, upperBound: 2.0, value: 15, unit: 'CV%' as const },
+    { lowerBound: 0, upperBound: xaRange.lower, value: 0.05 },
+    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 10 },
+    { lowerBound: xaRange.upper, upperBound: 2.0, value: 15 },
   ],
   apttCurrent: [
-    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0, unit: 'SD' as const },
-    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5, unit: 'CV%' as const },
-    { lowerBound: apttRange.upper, upperBound: 200, value: 8, unit: 'CV%' as const },
+    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0 },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5 },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 8 },
   ],
   apttNew: [
-    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0, unit: 'SD' as const },
-    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5, unit: 'CV%' as const },
-    { lowerBound: apttRange.upper, upperBound: 200, value: 8, unit: 'CV%' as const },
+    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0 },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5 },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 8 },
   ],
 });

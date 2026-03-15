@@ -256,3 +256,42 @@ export const getComparisonsSummary = (data: ProcessedDataRow[]): Comparison[] =>
     };
   });
 };
+
+export const exportProcessedDataToCSV = (data: ProcessedDataRow[], comparisons: Comparison[]) => {
+  const exportData = data.map(row => {
+    const comparison = comparisons.find(c => c.id === row.comparisonId);
+    
+    return {
+      'ID': row.id,
+      'Year': row.year,
+      'Xa': row.xa,
+      'APTT New Lot': row.apttNew,
+      'APTT Current Lot': row.apttCurrent,
+      'New Lot ID': row.newLotId,
+      'Current Lot ID': row.currentLotId,
+      'Comparison ID': row.comparisonId,
+      'Analyser': row.analyser,
+      'Manufacturer': row.manufacturer,
+      'Assay Name': row.assayName,
+      'Is Usable': row.isUsable ? 'Yes' : 'No',
+      'Is Excluded': row.excluded ? 'Yes' : 'No',
+      'Exclusion Reason': row.exclusionReason,
+      'QC Flags': row.flags.join('; '),
+      'Comparison Label': comparison?.label || 'Unassigned',
+      'Included in Analysis': comparison?.included ? 'Yes' : 'No',
+      'Is Primary Comparison': comparison?.isPrimary ? 'Yes' : 'No',
+      'Primary Comparison Indicator': (comparison?.isPrimary && row.isUsable) ? 'PRIMARY' : ''
+    };
+  });
+
+  const csv = Papa.unparse(exportData);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  link.setAttribute('download', `processed_dataset_${new Date().toISOString().split('T')[0]}.csv`);
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
