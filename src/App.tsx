@@ -11,6 +11,7 @@ import {
   BarChart3, 
   AlertTriangle, 
   CheckCircle2, 
+  AlertCircle,
   ChevronRight, 
   ChevronLeft,
   Play,
@@ -18,7 +19,12 @@ import {
   Info,
   History,
   FlaskConical,
-  Beaker
+  Beaker,
+  Search,
+  Plus,
+  Trash2,
+  Save,
+  TrendingUp
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -28,7 +34,11 @@ import {
   ProcessedDataRow, 
   AnalysisConfig, 
   AnalysisResults, 
-  LabConfig 
+  LabConfig,
+  FileValidationSummary,
+  Range,
+  Comparison,
+  SetupStep
 } from './types';
 import { 
   DEFAULT_XA_RANGE, 
@@ -36,7 +46,7 @@ import {
   DEFAULT_MU_BANDS,
   DEFAULT_RISK_WEIGHTS 
 } from './constants';
-import { parseCSV, validateData } from './services/dataService';
+import { parseCSV, validateDataQuality, detectComparisons, getComparisonsSummary } from './services/dataService';
 import { runAnalysis } from './services/statsService';
 
 // Utility for tailwind classes
@@ -45,7 +55,6 @@ function cn(...inputs: ClassValue[]) {
 }
 
 type AppState = 'setup' | 'dashboard';
-type SetupStep = 'upload' | 'config' | 'mu' | 'review' | 'run';
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('setup');
@@ -53,7 +62,35 @@ export default function App() {
   
   // Data State
   const [rawData, setRawData] = useState<ProcessedDataRow[]>([]);
+  const [fileSummary, setFileSummary] = useState<FileValidationSummary | null>(null);
   const [dataFlags, setDataFlags] = useState<string[]>([]);
+  const [selectedRows, setSelectedRows] = useState<string[]>([]);
+  const [isManualMode, setIsManualMode] = useState(false);
+  const [newComparisonLabel, setNewComparisonLabel] = useState('');
+  const [comparisonSettings, setComparisonSettings] = useState<Record<string, { included: boolean, isPrimary: boolean, exclusionReason: string }>>({});
+  
+  const comparisons = useMemo(() => {
+    const base = getComparisonsSummary(rawData);
+    
+    // Merge with settings and handle auto-primary
+    const merged = base.map(c => {
+      const settings = comparisonSettings[c.id] || { 
+        included: true, 
+        isPrimary: base.length === 1, 
+        exclusionReason: '' 
+      };
+      return { ...c, ...settings };
+    });
+
+    // Ensure exactly one primary if there are included comparisons and none is primary
+    const included = merged.filter(c => c.included);
+    if (included.length > 0 && !included.some(c => c.isPrimary)) {
+      const firstIncluded = merged.find(c => c.included);
+      if (firstIncluded) firstIncluded.isPrimary = true;
+    }
+
+    return merged;
+  }, [rawData, comparisonSettings]);
   
   // Config State
   const [labConfig, setLabConfig] = useState<LabConfig>({
@@ -77,33 +114,156 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // Handlers
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const updateComparisonLabel = (id: string, label: string) => {
+    const newId = `cid:${label}`;
+    setRawData(prev => prev.map(row => 
+      row.comparisonId === id ? { ...row, comparisonId: newId } : row
+    ));
+    // Move settings to new ID
+    setComparisonSettings(prev => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      next[newId] = next[id];
+      delete next[id];
+      return next;
+    });
+  };
+
+  const toggleComparisonInclusion = (id: string) => {
+    setComparisonSettings(prev => {
+      const current = prev[id] || { included: true, isPrimary: false, exclusionReason: '' };
+      const nextIncluded = !current.included;
+      return {
+        ...prev,
+        [id]: { ...current, included: nextIncluded, isPrimary: nextIncluded ? current.isPrimary : false }
+      };
+    });
+  };
+
+  const setPrimaryComparison = (id: string) => {
+    setComparisonSettings(prev => {
+      const next: Record<string, { included: boolean, isPrimary: boolean, exclusionReason: string }> = {};
+      
+      // Initialize next with existing settings or defaults for all current comparisons
+      comparisons.forEach(c => {
+        next[c.id] = prev[c.id] || { included: true, isPrimary: false, exclusionReason: '' };
+      });
+
+      // Unset all others
+      Object.keys(next).forEach(key => {
+        next[key] = { ...next[key], isPrimary: false };
+      });
+      
+      // Set this one
+      const current = next[id] || { included: true, isPrimary: false, exclusionReason: '' };
+      next[id] = { ...current, isPrimary: true, included: true };
+      return next;
+    });
+  };
+
+  const updateExclusionReason = (id: string, reason: string) => {
+    setComparisonSettings(prev => ({
+      ...prev,
+      [id]: { ...(prev[id] || { included: true, isPrimary: false, exclusionReason: '' }), exclusionReason: reason }
+    }));
+  };
+
+  const canContinueToConfig = useMemo(() => {
+    const included = comparisons.filter(c => c.included);
+    if (included.length === 0) return false;
+    if (!included.some(c => c.isPrimary)) return false;
+    
+    // Check exclusion reasons
+    const excluded = comparisons.filter(c => !c.included);
+    if (excluded.some(c => !c.exclusionReason?.trim())) return false;
+    
+    return true;
+  }, [comparisons]);
+
+  const reassignRows = (comparisonId: string) => {
+    setRawData(prev => prev.map(row => 
+      selectedRows.includes(row.id) ? { ...row, comparisonId } : row
+    ));
+    setSelectedRows([]);
+  };
+
+  const createAndAssignRows = (label: string) => {
+    const newId = `cid:${label}`;
+    reassignRows(newId);
+  };
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      const parsed = parseCSV(text);
-      setRawData(parsed);
-      setDataFlags(validateData(parsed));
-      setSetupStep('config');
-    };
-    reader.readAsText(file);
+    // Basic visual feedback
+    setIsAnalyzing(true);
+
+    try {
+      const { data, summary } = await parseCSV(file);
+      
+      const qualityFlags = validateDataQuality(data);
+      setDataFlags(qualityFlags);
+
+      const { updatedData } = detectComparisons(data);
+      setRawData(updatedData);
+      setFileSummary(summary);
+      
+      // Auto-populate metadata if found
+      if (data.length > 0) {
+        const firstRow = data[0];
+        setLabConfig(prev => ({
+          ...prev,
+          analyser: firstRow.analyser || prev.analyser,
+          manufacturer: firstRow.manufacturer || prev.manufacturer,
+          assayName: firstRow.assayName || prev.assayName,
+        }));
+      }
+    } catch (error) {
+      console.error('File upload failed:', error);
+      alert('Failed to parse CSV file. Please ensure it is a valid CSV.');
+    } finally {
+      setIsAnalyzing(false);
+      // Clear input so same file can be uploaded again
+      e.target.value = '';
+    }
   };
 
   const startDemo = () => {
     // Mock demo data
-    const demoData: ProcessedDataRow[] = Array.from({ length: 40 }, (_, i) => ({
-      id: `demo-${i}`,
-      year: 2025,
-      xa: 0.1 + Math.random() * 1.2,
-      apttCurrent: 40 + (i * 2) + Math.random() * 5,
-      apttNew: 42 + (i * 2.1) + Math.random() * 5,
-      excluded: false
-    }));
+    const demoData: ProcessedDataRow[] = Array.from({ length: 40 }, (_, i) => {
+      const isCapped = i > 35;
+      const flags = isCapped ? ['Capped APTT value (>= 139.0)'] : [];
+      return {
+        id: `demo-${i}`,
+        year: 2025,
+        xa: 0.1 + Math.random() * 1.2,
+        apttCurrent: 40 + (i * 2) + Math.random() * 5,
+        apttNew: isCapped ? 140 : 42 + (i * 2.1) + Math.random() * 5,
+        excluded: false,
+        flags: flags,
+        isHeaderDuplicate: false,
+        isUsable: true,
+        rawValues: {}
+      };
+    });
     setRawData(demoData);
-    setDataFlags([]);
+    const { comparisons: detected, updatedData } = detectComparisons(demoData);
+    setRawData(updatedData);
+    setFileSummary({
+      totalRows: 40,
+      usableRows: 40,
+      flaggedRows: 4,
+      excludedRows: 0,
+      issueCounts: {
+        missingValues: 0,
+        nonNumeric: 0,
+        headerDuplicates: 0,
+        cappedValues: 4
+      },
+      missingRequiredColumns: [],
+      detectedColumns: ['Year', 'Xa', 'APTT New Lot', 'APTT Current Lot'],
+      hasRequiredColumns: true
+    });
     setSetupStep('config');
   };
 
@@ -111,7 +271,11 @@ export default function App() {
     setIsAnalyzing(true);
     // Simulate processing time
     await new Promise(resolve => setTimeout(resolve, 1500));
-    const res = await runAnalysis(rawData, analysisConfig);
+    
+    const primaryComp = comparisons.find(c => c.isPrimary);
+    const analysisData = rawData.filter(d => d.comparisonId === primaryComp?.id);
+    
+    const res = await runAnalysis(analysisData, analysisConfig);
     setResults(res);
     setIsAnalyzing(false);
     setAppState('dashboard');
@@ -162,8 +326,9 @@ export default function App() {
               {/* Wizard Progress */}
               <div className="mb-12 flex justify-between relative">
                 <div className="absolute top-1/2 left-0 w-full h-0.5 bg-black/5 -translate-y-1/2 z-0" />
-                {['upload', 'config', 'mu', 'review', 'run'].map((step, idx) => {
-                  const isPast = ['upload', 'config', 'mu', 'review', 'run'].indexOf(setupStep) > idx;
+                {(['upload', 'comparison', 'config', 'mu', 'review'] as SetupStep[]).map((step, idx) => {
+                  const steps: SetupStep[] = ['upload', 'comparison', 'config', 'mu', 'review'];
+                  const isPast = steps.indexOf(setupStep) > idx;
                   const isCurrent = setupStep === step;
                   return (
                     <div key={step} className="relative z-10 flex flex-col items-center gap-2">
@@ -177,7 +342,7 @@ export default function App() {
                       <span className={cn(
                         "text-[10px] uppercase tracking-widest font-bold",
                         isCurrent ? "text-emerald-700" : "text-black/30"
-                      )}>{step}</span>
+                      )}>{step === 'mu' ? 'uncertainty' : step}</span>
                     </div>
                   );
                 })}
@@ -196,10 +361,23 @@ export default function App() {
                     </p>
                     
                     <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-                      <label className="flex-1 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-4 px-6 rounded-2xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-100">
-                        <Upload size={20} />
-                        Choose CSV File
-                        <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
+                      <label className={cn(
+                        "flex-1 cursor-pointer text-white font-semibold py-4 px-6 rounded-2xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-100",
+                        isAnalyzing ? "bg-emerald-400 cursor-not-allowed" : "bg-emerald-600 hover:bg-emerald-700"
+                      )}>
+                        {isAnalyzing ? (
+                          <div className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent" />
+                        ) : (
+                          <Upload size={20} />
+                        )}
+                        {isAnalyzing ? 'Processing...' : 'Choose CSV File'}
+                        <input 
+                          type="file" 
+                          accept=".csv" 
+                          className="hidden" 
+                          onChange={handleFileUpload} 
+                          disabled={isAnalyzing}
+                        />
                       </label>
                       <div className="flex-1 flex flex-col gap-2">
                         <button 
@@ -230,7 +408,416 @@ export default function App() {
                         <strong>Privacy Notice:</strong> All data processing occurs locally in your browser. No data is uploaded to any server or stored permanently.
                       </p>
                     </div>
+
+                    {/* File Summary & Preview */}
+                    {fileSummary && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="w-full mt-12 space-y-8"
+                      >
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                          <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
+                            <div className="text-[10px] font-bold text-black/40 uppercase tracking-widest mb-1">Total Rows</div>
+                            <div className="text-2xl font-semibold text-black/80">{fileSummary.totalRows}</div>
+                          </div>
+                          <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
+                            <div className="text-[10px] font-bold text-black/40 uppercase tracking-widest mb-1">Usable Rows</div>
+                            <div className="text-2xl font-semibold text-emerald-600">{fileSummary.usableRows}</div>
+                          </div>
+                          <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
+                            <div className="text-[10px] font-bold text-black/40 uppercase tracking-widest mb-1">Excluded Rows</div>
+                            <div className="text-2xl font-semibold text-red-600">{fileSummary.excludedRows}</div>
+                          </div>
+                          <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
+                            <div className="text-[10px] font-bold text-black/40 uppercase tracking-widest mb-1">Flagged (Retained)</div>
+                            <div className="text-2xl font-semibold text-amber-600">{fileSummary.flaggedRows - fileSummary.excludedRows}</div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                          <div className="bg-black/5 rounded-2xl p-6">
+                            <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 mb-4">QC Issue Breakdown</h4>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-black/60">Missing Values</span>
+                                <span className={cn("text-xs font-bold", fileSummary.issueCounts.missingValues > 0 ? "text-red-600" : "text-black/30")}>
+                                  {fileSummary.issueCounts.missingValues}
+                                </span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-black/60">Non-numeric Data</span>
+                                <span className={cn("text-xs font-bold", fileSummary.issueCounts.nonNumeric > 0 ? "text-red-600" : "text-black/30")}>
+                                  {fileSummary.issueCounts.nonNumeric}
+                                </span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-black/60">Header Duplicates</span>
+                                <span className={cn("text-xs font-bold", fileSummary.issueCounts.headerDuplicates > 0 ? "text-red-600" : "text-black/30")}>
+                                  {fileSummary.issueCounts.headerDuplicates}
+                                </span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-black/60">Capped/Censored Values</span>
+                                <span className={cn("text-xs font-bold", fileSummary.issueCounts.cappedValues > 0 ? "text-amber-600" : "text-black/30")}>
+                                  {fileSummary.issueCounts.cappedValues}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="bg-amber-50/50 border border-amber-100 rounded-2xl p-6">
+                            <div className="flex gap-3 mb-3">
+                              <div className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center text-amber-600 shrink-0">
+                                <Info size={16} />
+                              </div>
+                              <h4 className="text-xs font-bold uppercase tracking-widest text-amber-800 self-center">About Capped Values</h4>
+                            </div>
+                            <p className="text-xs text-amber-900/70 leading-relaxed">
+                              Capped or censored values occur when a result exceeds the laboratory's validated measuring range (e.g., APTT &gt; 139s or Xa &gt; 1.5 IU/mL). 
+                              These are flagged because they represent "at least" that value, which can skew statistical correlations. They are retained for now but should be reviewed.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="bg-black/5 rounded-2xl p-6">
+                          <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 mb-4">Column Detection</h4>
+                          <div className="flex flex-wrap gap-2">
+                            {fileSummary.detectedColumns.map(col => (
+                              <span key={col} className="px-3 py-1.5 bg-white border border-black/5 rounded-xl text-xs font-bold text-black/60">
+                                {col}
+                              </span>
+                            ))}
+                            {fileSummary.missingRequiredColumns.map(col => (
+                              <span key={col} className="px-3 py-1.5 bg-red-50 border border-red-100 rounded-xl text-xs font-bold text-red-600 flex items-center gap-1.5">
+                                <AlertCircle size={14} /> Missing: {col}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="bg-white rounded-2xl border border-black/5 shadow-sm overflow-hidden">
+                          <div className="px-6 py-4 border-b border-black/5 bg-black/[0.02] flex justify-between items-center">
+                            <h4 className="text-xs font-bold uppercase tracking-widest text-black/40">Data Preview (First 20 Rows)</h4>
+                            <span className="text-[10px] text-black/30 italic">Flagged rows highlighted in amber</span>
+                          </div>
+                          <div className="overflow-x-auto max-h-[400px]">
+                            <table className="w-full text-left text-sm">
+                              <thead className="bg-black/[0.02] sticky top-0 border-b border-black/5">
+                                  <tr>
+                                    <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Status</th>
+                                    <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Year</th>
+                                    <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Xa</th>
+                                    <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">New Lot</th>
+                                    <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Current Lot</th>
+                                    <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Flags</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-black/5">
+                                  {rawData.slice(0, 20).map((row, idx) => (
+                                    <tr key={idx} className={cn(
+                                      "transition-colors",
+                                      row.excluded ? "bg-red-50/30 opacity-60" : row.isUsable ? "hover:bg-black/[0.01]" : "bg-amber-50/50"
+                                    )}>
+                                      <td className="px-6 py-3">
+                                        {row.excluded ? (
+                                          <span className="text-[9px] px-1.5 py-0.5 bg-red-100 text-red-700 rounded-md font-bold uppercase tracking-tighter">Excluded</span>
+                                        ) : row.isUsable ? (
+                                          <span className="text-[9px] px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded-md font-bold uppercase tracking-tighter">Usable</span>
+                                        ) : (
+                                          <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded-md font-bold uppercase tracking-tighter">Flagged</span>
+                                        )}
+                                      </td>
+                                      <td className="px-6 py-3 text-black/60 font-mono text-xs">{row.year || '-'}</td>
+                                      <td className="px-6 py-3 text-black font-semibold">{row.xa ?? '-'}</td>
+                                      <td className="px-6 py-3 text-black">{row.apttNew ?? '-'}</td>
+                                      <td className="px-6 py-3 text-black">{row.apttCurrent ?? '-'}</td>
+                                      <td className="px-6 py-3">
+                                        {row.flags.length > 0 ? (
+                                          <div className="flex flex-wrap gap-1">
+                                            {row.flags.map((f, i) => (
+                                              <span key={i} className={cn(
+                                                "text-[9px] px-1.5 py-0.5 rounded-md font-bold uppercase tracking-tighter",
+                                                row.excluded ? "bg-red-50 text-red-600" : "bg-amber-100 text-amber-700"
+                                              )}>
+                                                {f}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        ) : (
+                                          <CheckCircle2 size={14} className="text-emerald-500" />
+                                        )}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-center pt-4">
+                          <button
+                            onClick={() => setSetupStep('comparison')}
+                            disabled={!fileSummary.hasRequiredColumns || fileSummary.usableRows === 0}
+                            className="px-8 py-4 bg-emerald-600 text-white rounded-2xl font-bold transition-all hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg shadow-emerald-100"
+                          >
+                            Continue to Comparison Review
+                            <ChevronRight size={20} />
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
                   </div>
+                )}
+
+                {setupStep === 'comparison' && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="space-y-8"
+                  >
+                    <div className="flex justify-between items-end">
+                      <div>
+                        <h2 className="text-2xl font-semibold mb-2">Comparison Review</h2>
+                        <p className="text-sm text-black/50">Verify detected comparisons and assign labels.</p>
+                      </div>
+                      <button 
+                        onClick={() => setIsManualMode(!isManualMode)}
+                        className={cn(
+                          "px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
+                          isManualMode ? "bg-black text-white" : "bg-black/5 text-black/60 hover:bg-black/10"
+                        )}
+                      >
+                        <Settings size={14} />
+                        {isManualMode ? "Exit Manual Mode" : "Manual Assignment"}
+                      </button>
+                    </div>
+
+                    {isManualMode ? (
+                      <div className="space-y-6">
+                        <div className="bg-black/5 rounded-2xl p-6 flex flex-wrap items-center gap-4">
+                          <div className="flex-1 min-w-[200px]">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-2">
+                              {selectedRows.length} rows selected
+                            </p>
+                            <div className="flex gap-2">
+                              <select 
+                                onChange={(e) => reassignRows(e.target.value)}
+                                className="flex-1 bg-white border border-black/10 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                defaultValue=""
+                              >
+                                <option value="" disabled>Assign to existing...</option>
+                                {comparisons.map(c => (
+                                  <option key={c.id} value={c.id}>{c.label}</option>
+                                ))}
+                              </select>
+                              <div className="flex gap-2 flex-1">
+                                <input 
+                                  type="text"
+                                  placeholder="New label..."
+                                  value={newComparisonLabel}
+                                  onChange={(e) => setNewComparisonLabel(e.target.value)}
+                                  className="flex-1 bg-white border border-black/10 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                />
+                                <button 
+                                  onClick={() => {
+                                    if (newComparisonLabel) {
+                                      createAndAssignRows(newComparisonLabel);
+                                      setNewComparisonLabel('');
+                                    }
+                                  }}
+                                  disabled={!newComparisonLabel || selectedRows.length === 0}
+                                  className="px-3 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 disabled:opacity-50"
+                                >
+                                  Create
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white rounded-2xl border border-black/5 shadow-sm overflow-hidden">
+                          <div className="overflow-x-auto max-h-[500px]">
+                            <table className="w-full text-left text-sm">
+                              <thead className="bg-black/[0.02] sticky top-0 border-b border-black/5 z-10">
+                                <tr>
+                                  <th className="px-6 py-3 w-10">
+                                    <input 
+                                      type="checkbox" 
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setSelectedRows(rawData.filter(r => r.isUsable).map(r => r.id));
+                                        } else {
+                                          setSelectedRows([]);
+                                        }
+                                      }}
+                                      checked={selectedRows.length === rawData.filter(r => r.isUsable).length && selectedRows.length > 0}
+                                    />
+                                  </th>
+                                  <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Current Assignment</th>
+                                  <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Year</th>
+                                  <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Lot IDs</th>
+                                  <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Xa</th>
+                                  <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">APTT New</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-black/5">
+                                {rawData.filter(r => r.isUsable).map((row) => (
+                                  <tr key={row.id} className={cn(
+                                    "hover:bg-black/[0.01] transition-colors",
+                                    selectedRows.includes(row.id) && "bg-emerald-50/50"
+                                  )}>
+                                    <td className="px-6 py-3">
+                                      <input 
+                                        type="checkbox" 
+                                        checked={selectedRows.includes(row.id)}
+                                        onChange={(e) => {
+                                          if (e.target.checked) {
+                                            setSelectedRows([...selectedRows, row.id]);
+                                          } else {
+                                            setSelectedRows(selectedRows.filter(id => id !== row.id));
+                                          }
+                                        }}
+                                      />
+                                    </td>
+                                    <td className="px-6 py-3">
+                                      <span className="text-xs font-medium text-black/80">
+                                        {comparisons.find(c => c.id === row.comparisonId)?.label || "Unassigned"}
+                                      </span>
+                                    </td>
+                                    <td className="px-6 py-3 text-black/60 font-mono text-xs">{row.year}</td>
+                                    <td className="px-6 py-3 text-black/60 text-xs">
+                                      {row.newLotId || '-'} / {row.currentLotId || '-'}
+                                    </td>
+                                    <td className="px-6 py-3 font-semibold">{row.xa}</td>
+                                    <td className="px-6 py-3">{row.apttNew}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {comparisons.some(c => c.isAutoAssigned) && (
+                          <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 flex items-center gap-3 text-emerald-800">
+                            <CheckCircle2 size={20} className="text-emerald-500" />
+                            <span className="text-xs font-medium">One comparison per year was automatically detected and assigned.</span>
+                          </div>
+                        )}
+
+                        <div className="bg-white rounded-2xl border border-black/5 shadow-sm overflow-hidden">
+                          <table className="w-full text-left text-sm">
+                            <thead className="bg-black/[0.02] border-b border-black/5">
+                              <tr>
+                                <th className="px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Inc.</th>
+                                <th className="px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Pri.</th>
+                                <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Label</th>
+                                <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Year</th>
+                                <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40">Lot IDs</th>
+                                <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Rows</th>
+                                <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Flags</th>
+                                <th className="px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-black/40 text-right">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-black/5">
+                              {comparisons.map((comp) => (
+                                <tr key={comp.id} className={cn(
+                                  "hover:bg-black/[0.01] transition-colors",
+                                  !comp.included && "opacity-60 bg-black/[0.02]",
+                                  comp.isPrimary && "bg-emerald-50/30"
+                                )}>
+                                  <td className="px-4 py-4 text-center">
+                                    <input 
+                                      type="checkbox" 
+                                      checked={comp.included}
+                                      onChange={() => toggleComparisonInclusion(comp.id)}
+                                      className="rounded border-black/10 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                  </td>
+                                  <td className="px-4 py-4 text-center">
+                                    <input 
+                                      type="radio" 
+                                      name="primary-comparison"
+                                      checked={comp.isPrimary}
+                                      disabled={!comp.included}
+                                      onChange={() => setPrimaryComparison(comp.id)}
+                                      className="text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                  </td>
+                                  <td className="px-6 py-4">
+                                    <div className="space-y-1">
+                                      <input 
+                                        type="text"
+                                        value={comp.label}
+                                        onChange={(e) => updateComparisonLabel(comp.id, e.target.value)}
+                                        className={cn(
+                                          "bg-transparent border-b border-transparent hover:border-black/10 focus:border-emerald-500 focus:outline-none font-semibold text-black/80 w-full",
+                                          !comp.included && "line-through text-black/40"
+                                        )}
+                                      />
+                                      {!comp.included && (
+                                        <input 
+                                          type="text"
+                                          placeholder="Reason for exclusion..."
+                                          value={comp.exclusionReason}
+                                          onChange={(e) => updateExclusionReason(comp.id, e.target.value)}
+                                          className="w-full text-[10px] bg-white border border-red-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-red-500 text-red-700"
+                                        />
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-6 py-4 text-black/60 font-mono text-xs">{comp.year || '-'}</td>
+                                  <td className="px-6 py-4 text-black/60 text-xs">
+                                    {comp.newLotId || 'N/A'} / {comp.currentLotId || 'N/A'}
+                                  </td>
+                                  <td className="px-6 py-4 text-center font-bold text-black/80">{comp.rowCount}</td>
+                                  <td className="px-6 py-4 text-center">
+                                    <span className={cn(
+                                      "px-2 py-0.5 rounded-full text-[10px] font-bold",
+                                      comp.flagCount > 0 ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+                                    )}>
+                                      {comp.flagCount}
+                                    </span>
+                                  </td>
+                                  <td className="px-6 py-4 text-right">
+                                    <button 
+                                      onClick={() => {
+                                        setIsManualMode(true);
+                                        setSelectedRows(rawData.filter(r => r.comparisonId === comp.id).map(r => r.id));
+                                      }}
+                                      className="text-black/40 hover:text-black/80 transition-colors"
+                                    >
+                                      <Settings size={16} />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
+
+                    <div className="flex justify-between items-center pt-4">
+                      <button
+                        onClick={() => setSetupStep('upload')}
+                        className="px-6 py-3 border border-black/10 text-black/60 rounded-2xl font-bold transition-all hover:bg-black/5 flex items-center gap-2"
+                      >
+                        <ChevronLeft size={20} />
+                        Back to QC
+                      </button>
+                      <button
+                        onClick={() => setSetupStep('config')}
+                        disabled={!canContinueToConfig}
+                        className="px-8 py-4 bg-emerald-600 text-white rounded-2xl font-bold transition-all hover:bg-emerald-700 flex items-center gap-2 shadow-lg shadow-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Continue to Configuration
+                        <ChevronRight size={20} />
+                      </button>
+                    </div>
+                  </motion.div>
                 )}
 
                 {setupStep === 'config' && (
@@ -416,7 +1003,7 @@ export default function App() {
                       </div>
                       <div className="bg-[#F5F5F4] p-6 rounded-2xl border border-black/5">
                         <p className="text-[10px] font-bold text-black/40 uppercase tracking-widest mb-1">Active Comparisons</p>
-                        <p className="text-3xl font-semibold">1</p>
+                        <p className="text-3xl font-semibold">{comparisons.filter(c => c.included).length}</p>
                       </div>
                       <div className="bg-[#F5F5F4] p-6 rounded-2xl border border-black/5">
                         <p className="text-[10px] font-bold text-black/40 uppercase tracking-widest mb-1">Quality Status</p>
@@ -481,7 +1068,9 @@ export default function App() {
               <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
                 <div>
                   <div className="flex items-center gap-3 mb-2">
-                    <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase tracking-widest rounded-full">Primary Analysis</span>
+                    <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase tracking-widest rounded-full">
+                      Primary: {comparisons.find(c => c.isPrimary)?.label || 'None'}
+                    </span>
                     <span className="text-black/30 text-xs font-medium flex items-center gap-1"><History size={14} /> Generated {new Date().toLocaleTimeString()}</span>
                   </div>
                   <h2 className="text-4xl font-semibold tracking-tight">Analysis Dashboard</h2>

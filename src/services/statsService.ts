@@ -11,7 +11,7 @@ export const runAnalysis = async (
   data: ProcessedDataRow[],
   config: AnalysisConfig
 ): Promise<AnalysisResults> => {
-  const activeData = data.filter(d => !d.excluded);
+  const activeData = data.filter(d => d.isUsable && !d.excluded);
   
   // Placeholder for Deming Regression
   // For scaffold, we'll simulate results based on simple averages/slopes

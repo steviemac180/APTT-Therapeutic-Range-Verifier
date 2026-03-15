@@ -16,15 +16,38 @@ export interface RawDataRow {
 
 export interface ProcessedDataRow {
   id: string;
-  year: number;
-  xa: number;
-  apttNew: number;
-  apttCurrent: number;
+  year: number | null;
+  xa: number | null;
+  apttNew: number | null;
+  apttCurrent: number | null;
   newLotId?: string;
   currentLotId?: string;
   comparisonId?: string;
+  analyser?: string;
+  manufacturer?: string;
+  assayName?: string;
   excluded: boolean;
   exclusionReason?: string;
+  flags: string[];
+  isHeaderDuplicate: boolean;
+  isUsable: boolean;
+  rawValues: Record<string, string>;
+}
+
+export interface FileValidationSummary {
+  totalRows: number;
+  usableRows: number;
+  flaggedRows: number;
+  excludedRows: number;
+  issueCounts: {
+    missingValues: number;
+    nonNumeric: number;
+    headerDuplicates: number;
+    cappedValues: number;
+  };
+  missingRequiredColumns: string[];
+  detectedColumns: string[];
+  hasRequiredColumns: boolean;
 }
 
 export type DecisionCategory = 'No change' | 'Minor change' | 'Major change' | 'Review required';
@@ -92,3 +115,19 @@ export interface AnalysisResults {
     widthInterval: [number, number];
   };
 }
+
+export interface Comparison {
+  id: string;
+  label: string;
+  year: number | null;
+  newLotId?: string;
+  currentLotId?: string;
+  rowCount: number;
+  flagCount: number;
+  isAutoAssigned: boolean;
+  included: boolean;
+  isPrimary: boolean;
+  exclusionReason?: string;
+}
+
+export type SetupStep = 'upload' | 'comparison' | 'config' | 'mu' | 'review';
