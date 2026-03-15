@@ -128,6 +128,19 @@ export interface SummaryResults {
   }[];
 }
 
+export interface ConfusionMatrix {
+  below: { below: number; therapeutic: number; above: number };
+  therapeutic: { below: number; therapeutic: number; above: number };
+  above: { below: number; therapeutic: number; above: number };
+}
+
+export interface MisclassificationData {
+  total: number;
+  rate: number;
+  weightedScore: number;
+  matrix: ConfusionMatrix;
+}
+
 export interface AnalysisResults {
   summary: SummaryResults;
   decision: DecisionCategory;
@@ -142,14 +155,21 @@ export interface AnalysisResults {
     width: number;
   };
   misclassification: {
-    current: number;
-    proposed: number;
+    current: MisclassificationData;
+    proposed: MisclassificationData;
     improvement: number;
+    weightedImprovement: number;
   };
+  regressionMethod: 'Weighted Deming' | 'Standard Deming';
+  regressionReason?: string;
   uncertainty: {
     lowerInterval: [number, number];
     upperInterval: [number, number];
     widthInterval: [number, number];
+    lowerShiftInterval: [number, number];
+    upperShiftInterval: [number, number];
+    widthShiftInterval: [number, number];
+    iterations: number;
   };
 }
 

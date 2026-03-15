@@ -20,8 +20,8 @@ export const DEFAULT_MU_UNITS = {
 export const DEFAULT_MU_BANDS = (xaRange: { lower: number, upper: number }, apttRange: { lower: number, upper: number }) => ({
   xa: [
     { lowerBound: 0, upperBound: xaRange.lower, value: 0.05 },
-    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 10 },
-    { lowerBound: xaRange.upper, upperBound: 2.0, value: 15 },
+    { lowerBound: xaRange.lower, upperBound: xaRange.upper, value: 0.06 },
+    { lowerBound: xaRange.upper, upperBound: 2.0, value: 0.06 },
   ],
   apttCurrent: [
     { lowerBound: 0, upperBound: apttRange.lower, value: 2.0 },

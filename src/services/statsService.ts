@@ -1,9 +1,32 @@
 import { ProcessedDataRow, AnalysisConfig, AnalysisResults, Range, Comparison } from '../types';
 import { prepareAnalysisData, generateSummaryResults } from './analysis/dataPrep';
-import { calculateMUAdjustments } from './analysis/muHandler';
+import { calculateMUAdjustments, calculateSampleWeights } from './analysis/muHandler';
 import { fitDemingRegression, predictRange } from './analysis/regression';
 import { calculateMisclassificationRates } from './analysis/misclassification';
 import { generateRecommendations } from './analysis/recommendation';
+
+const runBootstrap = (data: ProcessedDataRow[], config: AnalysisConfig, iterations: number): Promise<any> => {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./analysis/bootstrap.worker.ts', import.meta.url), { type: 'module' });
+    worker.postMessage({ data, config, iterations });
+    worker.onmessage = (e) => {
+      resolve(e.data);
+      worker.terminate();
+    };
+    worker.onerror = (e) => {
+      reject(e);
+      worker.terminate();
+    };
+  });
+};
+
+const calculatePercentiles = (values: number[], p1: number, p2: number): [number, number] => {
+  if (values.length === 0) return [0, 0];
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx1 = Math.max(0, Math.min(sorted.length - 1, Math.floor(p1 * sorted.length)));
+  const idx2 = Math.max(0, Math.min(sorted.length - 1, Math.floor(p2 * sorted.length)));
+  return [sorted[idx1], sorted[idx2]];
+};
 
 export const runAnalysis = async (
   data: ProcessedDataRow[],
@@ -14,12 +37,17 @@ export const runAnalysis = async (
   const activeData = prepareAnalysisData(data, comparisons);
   const summary = generateSummaryResults(data, comparisons);
   
-  // 2. MU Handling
+  // 2. MU Handling & Weighting
   const muAdjustments = calculateMUAdjustments(activeData, config);
   
+  // Calculate weights for each sample
+  const currentWeights = activeData.map(row => calculateSampleWeights(row, config, 'apttCurrent'));
+  const newWeights = activeData.map(row => calculateSampleWeights(row, config, 'apttNew'));
+
   // 3. Regression
-  const currentModel = fitDemingRegression(activeData, 'xa', 'apttCurrent');
-  const newModel = fitDemingRegression(activeData, 'xa', 'apttNew');
+  // Attempt weighted Deming first
+  const currentModel = fitDemingRegression(activeData, 'xa', 'apttCurrent', currentWeights);
+  const newModel = fitDemingRegression(activeData, 'xa', 'apttNew', newWeights);
 
   const currentLotPredictedRaw = predictRange(currentModel, config.therapeuticXaRange);
   const newLotPredictedRaw = predictRange(newModel, config.therapeuticXaRange);
@@ -47,15 +75,16 @@ export const runAnalysis = async (
     width: (proposedRange.upper - proposedRange.lower) - (config.currentApprovedRange.upper - config.currentApprovedRange.lower)
   };
 
-  // 4. Confidence & Recommendations
-  let confidence: AnalysisResults['confidence'] = 'High confidence';
-  if (activeData.length < 20) {
-    confidence = 'Low confidence';
-  } else if (activeData.length < 40) {
-    confidence = 'Moderate confidence';
-  }
+  // 4. Bootstrap Uncertainty
+  const iterations = config.analysisDepth === 'Advanced' ? 1000 : 200;
+  const bootstrapResults = await runBootstrap(activeData, config, iterations);
 
-  const { decision, interpretation } = generateRecommendations(shifts, confidence);
+  const lowerInterval = calculatePercentiles(bootstrapResults.lowerLimits, 0.025, 0.975);
+  const upperInterval = calculatePercentiles(bootstrapResults.upperLimits, 0.025, 0.975);
+  const widthInterval = calculatePercentiles(bootstrapResults.widths, 0.025, 0.975);
+  const lowerShiftInterval = calculatePercentiles(bootstrapResults.lowerShifts, 0.025, 0.975);
+  const upperShiftInterval = calculatePercentiles(bootstrapResults.upperShifts, 0.025, 0.975);
+  const widthShiftInterval = calculatePercentiles(bootstrapResults.widthShifts, 0.025, 0.975);
 
   // 5. Misclassification
   const misclassification = calculateMisclassificationRates(
@@ -64,6 +93,16 @@ export const runAnalysis = async (
     proposedRange, 
     config
   );
+
+  // 6. Confidence & Recommendations
+  let confidence: AnalysisResults['confidence'] = 'High confidence';
+  if (activeData.length < 20) {
+    confidence = 'Low confidence';
+  } else if (activeData.length < 40) {
+    confidence = 'Moderate confidence';
+  }
+
+  const { decision, interpretation } = generateRecommendations(shifts, confidence, misclassification);
 
   return {
     summary,
@@ -75,10 +114,16 @@ export const runAnalysis = async (
     newLotPredicted,
     shifts,
     misclassification,
+    regressionMethod: newModel.method,
+    regressionReason: newModel.reason,
     uncertainty: {
-      lowerInterval: [proposedRange.lower - 1.5, proposedRange.lower + 1.5],
-      upperInterval: [proposedRange.upper - 2.0, proposedRange.upper + 2.0],
-      widthInterval: [proposedRange.upper - proposedRange.lower - 1.0, proposedRange.upper - proposedRange.lower + 1.0]
+      lowerInterval,
+      upperInterval,
+      widthInterval,
+      lowerShiftInterval,
+      upperShiftInterval,
+      widthShiftInterval,
+      iterations
     }
   };
 };

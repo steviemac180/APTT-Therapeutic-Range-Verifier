@@ -38,7 +38,8 @@ import {
   FileValidationSummary,
   Range,
   Comparison,
-  SetupStep
+  SetupStep,
+  ConfusionMatrix
 } from './types';
 import { 
   DEFAULT_XA_RANGE, 
@@ -56,6 +57,56 @@ function cn(...inputs: ClassValue[]) {
 }
 
 type AppState = 'setup' | 'dashboard';
+
+function ConfusionMatrixTable({ data, title }: { data: ConfusionMatrix, title: string }) {
+  const categories: ('below' | 'therapeutic' | 'above')[] = ['below', 'therapeutic', 'above'];
+  const labels = {
+    below: 'Sub',
+    therapeutic: 'Therapeutic',
+    above: 'Supra'
+  };
+
+  return (
+    <div className="space-y-4">
+      <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">{title}</h5>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px]">
+          <thead>
+            <tr>
+              <th className="p-2 border-b border-black/5 text-left text-black/30 font-bold uppercase">Truth (Xa)</th>
+              {categories.map(cat => (
+                <th key={cat} className="p-2 border-b border-black/5 text-center text-black/30 font-bold uppercase">{labels[cat]}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {categories.map(truthCat => (
+              <tr key={truthCat}>
+                <td className="p-2 border-r border-black/5 font-bold text-black/60 uppercase">{labels[truthCat]}</td>
+                {categories.map(predCat => {
+                  const val = data[truthCat][predCat];
+                  const isMismatch = truthCat !== predCat;
+                  return (
+                    <td 
+                      key={predCat} 
+                      className={cn(
+                        "p-3 text-center font-semibold text-xs",
+                        val === 0 ? "text-black/10" : 
+                        isMismatch ? "text-red-600 bg-red-50/30" : "text-emerald-600 bg-emerald-50/30"
+                      )}
+                    >
+                      {val}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('setup');
@@ -115,6 +166,7 @@ export default function App() {
 
   const [results, setResults] = useState<AnalysisResults | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [showConfusionMatrix, setShowConfusionMatrix] = useState(false);
 
   // Handlers
   const updateComparisonLabel = (id: string, label: string) => {
@@ -1576,29 +1628,123 @@ export default function App() {
                   {/* Misclassification Card */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm flex flex-col justify-between">
                     <div>
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-6">Misclassification Risk</h4>
+                      <div className="flex justify-between items-start mb-6">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Misclassification Risk</h4>
+                        <span className={cn(
+                          "text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full",
+                          results?.misclassification.improvement! > 0 ? "bg-emerald-100 text-emerald-700" : 
+                          results?.misclassification.improvement! < 0 ? "bg-red-100 text-red-700" : 
+                          "bg-slate-100 text-slate-600"
+                        )}>
+                          {results?.misclassification.improvement! > 0 ? 'Improved' : 
+                           results?.misclassification.improvement! < 0 ? 'Worsened' : 'Unchanged'}
+                        </span>
+                      </div>
+                      
                       <div className="flex items-end gap-4 mb-8">
                         <div className="flex-1 space-y-2">
                           <div className="h-24 bg-slate-100 rounded-xl relative overflow-hidden">
-                            <div className="absolute bottom-0 w-full bg-slate-400 transition-all duration-1000" style={{ height: `${results?.misclassification.current}%` }} />
+                            <div className="absolute bottom-0 w-full bg-slate-400 transition-all duration-1000" style={{ height: `${results?.misclassification.current.rate}%` }} />
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <span className="text-xs font-bold text-black/40">{results?.misclassification.current.rate}%</span>
+                            </div>
                           </div>
                           <p className="text-[10px] font-bold text-center uppercase tracking-tighter opacity-40">Current</p>
                         </div>
                         <div className="flex-1 space-y-2">
                           <div className="h-24 bg-emerald-50 rounded-xl relative overflow-hidden">
-                            <div className="absolute bottom-0 w-full bg-emerald-500 transition-all duration-1000" style={{ height: `${results?.misclassification.proposed}%` }} />
+                            <div className="absolute bottom-0 w-full bg-emerald-500 transition-all duration-1000" style={{ height: `${results?.misclassification.proposed.rate}%` }} />
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <span className="text-xs font-bold text-emerald-700">{results?.misclassification.proposed.rate}%</span>
+                            </div>
                           </div>
                           <p className="text-[10px] font-bold text-center uppercase tracking-tighter text-emerald-600">Proposed</p>
                         </div>
                       </div>
+                      
                       <p className="text-sm text-black/60 leading-relaxed">
-                        The proposed range reduces overall misclassification risk by <span className="font-bold text-emerald-600">{results?.misclassification.improvement}%</span>.
+                        {results?.misclassification.improvement! > 0 ? (
+                          <>The proposed range reduces overall misclassification risk by <span className="font-bold text-emerald-600">{results?.misclassification.improvement}%</span>.</>
+                        ) : results?.misclassification.improvement! < 0 ? (
+                          <>The proposed range increases misclassification risk by <span className="font-bold text-red-600">{Math.abs(results?.misclassification.improvement!)}%</span>.</>
+                        ) : (
+                          <>The proposed range maintains the existing misclassification risk level.</>
+                        )}
                       </p>
                     </div>
-                    <button className="mt-8 text-xs font-bold uppercase tracking-widest text-black/40 hover:text-black flex items-center gap-2 transition-colors">
-                      View Confusion Matrix <ChevronRight size={14} />
+                    <button 
+                      onClick={() => setShowConfusionMatrix(!showConfusionMatrix)}
+                      className="mt-8 text-xs font-bold uppercase tracking-widest text-black/40 hover:text-black flex items-center gap-2 transition-colors"
+                    >
+                      {showConfusionMatrix ? 'Hide' : 'View'} Confusion Matrix <ChevronRight size={14} className={cn("transition-transform", showConfusionMatrix && "rotate-90")} />
                     </button>
                   </div>
+
+                  {/* Advanced Misclassification Panel */}
+                  <AnimatePresence>
+                    {showConfusionMatrix && results && (
+                      <motion.div 
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="lg:col-span-3 bg-white rounded-[32px] border border-black/5 shadow-sm overflow-hidden"
+                      >
+                        <div className="p-8 space-y-8">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <h4 className="text-lg font-semibold tracking-tight">Advanced Misclassification Analysis</h4>
+                              <p className="text-xs text-black/40 uppercase font-bold tracking-widest mt-1">Weighted Risk & Confusion Matrix</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] font-bold text-black/30 uppercase tracking-widest mb-1">Weighted Risk Improvement</p>
+                              <p className={cn(
+                                "text-2xl font-bold",
+                                results.misclassification.weightedImprovement > 0 ? "text-emerald-600" : 
+                                results.misclassification.weightedImprovement < 0 ? "text-red-600" : "text-black/40"
+                              )}>
+                                {results.misclassification.weightedImprovement > 0 ? '+' : ''}
+                                {results.misclassification.weightedImprovement.toFixed(1)}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
+                            <div className="space-y-6">
+                              <ConfusionMatrixTable 
+                                title="Current Approved Range" 
+                                data={results.misclassification.current.matrix} 
+                              />
+                              <div className="bg-[#F5F5F4] p-4 rounded-2xl flex justify-between items-center">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-black/40">Weighted Risk Score</span>
+                                <span className="text-lg font-bold">{results.misclassification.current.weightedScore}</span>
+                              </div>
+                            </div>
+                            <div className="space-y-6">
+                              <ConfusionMatrixTable 
+                                title="Proposed New Range" 
+                                data={results.misclassification.proposed.matrix} 
+                              />
+                              <div className="bg-emerald-50 p-4 rounded-2xl flex justify-between items-center">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600/60">Weighted Risk Score</span>
+                                <span className="text-lg font-bold text-emerald-700">{results.misclassification.proposed.weightedScore}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="pt-8 border-t border-black/5">
+                            <div className="flex items-start gap-3 bg-blue-50/50 p-4 rounded-2xl">
+                              <Info size={16} className="text-blue-500 mt-0.5" />
+                              <p className="text-xs text-blue-800 leading-relaxed">
+                                <strong>Weighted Risk</strong> is calculated by multiplying each misclassification type by its assigned risk weight. 
+                                A lower score indicates a safer range. The confusion matrix shows how Anti-Xa "truth" categories (rows) compare to 
+                                APTT-based classifications (columns).
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
 
                   {/* Lot Comparison Card */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-6">
@@ -1626,28 +1772,134 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Uncertainty Summary */}
-                  <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm">
-                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-6">Uncertainty Summary (95% CI)</h4>
-                    <div className="space-y-6">
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-xs font-bold uppercase tracking-tighter opacity-40">
-                          <span>Lower Limit</span>
-                          <span>±{((results?.uncertainty.lowerInterval[1] || 0) - (results?.uncertainty.lowerInterval[0] || 0) / 2).toFixed(1)}s</span>
+                  {/* Uncertainty Summary Card */}
+                  <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
+                    <div className="flex justify-between items-start">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Bootstrap Uncertainty (95% CI)</h4>
+                      <span className="text-[10px] font-bold text-black/30 uppercase tracking-widest">{results?.uncertainty.iterations} Iterations</span>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 gap-6">
+                      <div className="space-y-4">
+                        <div className="flex justify-between items-end">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Predicted Limits</p>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-black/20 italic">95% Confidence Interval</p>
                         </div>
-                        <div className="h-1.5 bg-slate-100 rounded-full relative">
-                          <div className="absolute h-full bg-emerald-500 rounded-full" style={{ left: '40%', width: '20%' }} />
+                        <div className="space-y-4">
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-black/60">Lower Limit</span>
+                            <span className="text-sm font-bold">{results?.uncertainty.lowerInterval[0].toFixed(1)} – {results?.uncertainty.lowerInterval[1].toFixed(1)}s</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-black/60">Upper Limit</span>
+                            <span className="text-sm font-bold">{results?.uncertainty.upperInterval[0].toFixed(1)} – {results?.uncertainty.upperInterval[1].toFixed(1)}s</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-black/60">Therapeutic Width</span>
+                            <span className="text-sm font-bold">{results?.uncertainty.widthInterval[0].toFixed(1)} – {results?.uncertainty.widthInterval[1].toFixed(1)}s</span>
+                          </div>
                         </div>
                       </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-xs font-bold uppercase tracking-tighter opacity-40">
-                          <span>Upper Limit</span>
-                          <span>±{((results?.uncertainty.upperInterval[1] || 0) - (results?.uncertainty.upperInterval[0] || 0) / 2).toFixed(1)}s</span>
-                        </div>
-                        <div className="h-1.5 bg-slate-100 rounded-full relative">
-                          <div className="absolute h-full bg-emerald-500 rounded-full" style={{ left: '60%', width: '15%' }} />
+
+                      <div className="pt-6 border-t border-black/5 space-y-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Shift Uncertainty</p>
+                        <div className="space-y-4">
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-black/60">Lower Shift</span>
+                            <span className="text-sm font-bold">{results?.uncertainty.lowerShiftInterval[0] > 0 ? '+' : ''}{results?.uncertainty.lowerShiftInterval[0]} to {results?.uncertainty.lowerShiftInterval[1] > 0 ? '+' : ''}{results?.uncertainty.lowerShiftInterval[1]}s</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-black/60">Upper Shift</span>
+                            <span className="text-sm font-bold">{results?.uncertainty.upperShiftInterval[0] > 0 ? '+' : ''}{results?.uncertainty.upperShiftInterval[0]} to {results?.uncertainty.upperShiftInterval[1] > 0 ? '+' : ''}{results?.uncertainty.upperShiftInterval[1]}s</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-black/60">Width Shift</span>
+                            <span className="text-sm font-bold">{results?.uncertainty.widthShiftInterval[0] > 0 ? '+' : ''}{results?.uncertainty.widthShiftInterval[0]} to {results?.uncertainty.widthShiftInterval[1] > 0 ? '+' : ''}{results?.uncertainty.widthShiftInterval[1]}s</span>
+                          </div>
                         </div>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Range Comparison Visual with Intervals */}
+                  <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8 col-span-1 md:col-span-2">
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Range Stability & Uncertainty</h4>
+                    
+                    <div className="relative h-48 flex flex-col justify-center gap-12">
+                      {/* Scale Max Calculation */}
+                      {(() => {
+                        const maxVal = Math.max(
+                          analysisConfig.currentApprovedRange.upper + 20,
+                          results?.uncertainty.upperInterval[1]! + 20,
+                          100
+                        );
+                        const scaleStep = Math.ceil(maxVal / 4 / 10) * 10;
+                        const finalMax = scaleStep * 4;
+
+                        return (
+                          <>
+                            {/* Current Range */}
+                            <div className="relative">
+                              <div className="flex justify-between items-center mb-2">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-black/30">Current Approved</span>
+                                <span className="text-xs font-bold">{analysisConfig.currentApprovedRange.lower} – {analysisConfig.currentApprovedRange.upper}s</span>
+                              </div>
+                              <div className="h-4 bg-slate-100 rounded-full relative overflow-hidden">
+                                <div 
+                                  className="absolute h-full bg-slate-400/40" 
+                                  style={{ 
+                                    left: `${(analysisConfig.currentApprovedRange.lower / finalMax) * 100}%`, 
+                                    width: `${((analysisConfig.currentApprovedRange.upper - analysisConfig.currentApprovedRange.lower) / finalMax) * 100}%` 
+                                  }} 
+                                />
+                              </div>
+                            </div>
+
+                            {/* Proposed Range with CI */}
+                            <div className="relative">
+                              <div className="flex justify-between items-center mb-2">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600/60">Proposed New (with 95% CI)</span>
+                                <span className="text-xs font-bold text-emerald-700">{results?.proposedRange.lower} – {results?.proposedRange.upper}s</span>
+                              </div>
+                              <div className="h-4 bg-emerald-50 rounded-full relative">
+                                {/* Confidence Intervals (Shadows) */}
+                                <div 
+                                  className="absolute h-8 -top-2 bg-emerald-200/30 rounded-sm blur-[2px]" 
+                                  style={{ 
+                                    left: `${(results?.uncertainty.lowerInterval[0]! / finalMax) * 100}%`, 
+                                    width: `${((results?.uncertainty.lowerInterval[1]! - results?.uncertainty.lowerInterval[0]!) / finalMax) * 100}%` 
+                                  }} 
+                                />
+                                <div 
+                                  className="absolute h-8 -top-2 bg-emerald-200/30 rounded-sm blur-[2px]" 
+                                  style={{ 
+                                    left: `${(results?.uncertainty.upperInterval[0]! / finalMax) * 100}%`, 
+                                    width: `${((results?.uncertainty.upperInterval[1]! - results?.uncertainty.upperInterval[0]!) / finalMax) * 100}%` 
+                                  }} 
+                                />
+                                
+                                {/* Main Range */}
+                                <div 
+                                  className="absolute h-full bg-emerald-500" 
+                                  style={{ 
+                                    left: `${(results?.proposedRange.lower! / finalMax) * 100}%`, 
+                                    width: `${((results?.proposedRange.upper! - results?.proposedRange.lower!) / finalMax) * 100}%` 
+                                  }} 
+                                />
+                              </div>
+                            </div>
+                            
+                            {/* Scale */}
+                            <div className="absolute bottom-0 w-full flex justify-between text-[8px] font-bold text-black/20 uppercase tracking-widest pt-4 border-t border-black/5">
+                              <span>0s</span>
+                              <span>{scaleStep}s</span>
+                              <span>{scaleStep * 2}s</span>
+                              <span>{scaleStep * 3}s</span>
+                              <span>{finalMax}s</span>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -1677,6 +1929,7 @@ export default function App() {
                         <input 
                           type="number" 
                           value={results?.proposedRange.lower}
+                          readOnly
                           className="w-full bg-[#F5F5F4] border-none rounded-xl p-4 font-semibold text-xl focus:ring-2 focus:ring-emerald-500"
                         />
                       </div>
@@ -1685,6 +1938,7 @@ export default function App() {
                         <input 
                           type="number" 
                           value={results?.proposedRange.upper}
+                          readOnly
                           className="w-full bg-[#F5F5F4] border-none rounded-xl p-4 font-semibold text-xl focus:ring-2 focus:ring-emerald-500"
                         />
                       </div>
@@ -1704,7 +1958,20 @@ export default function App() {
               ) : (
                 <div className="space-y-8">
                   {/* Technical Summary View */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    {/* Regression Method */}
+                    <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Regression Engine</h4>
+                      <div className="space-y-2">
+                        <p className="text-sm font-bold text-black">{results?.regressionMethod}</p>
+                        <p className="text-[10px] text-black/40 leading-relaxed">
+                          {results?.regressionMethod === 'Weighted Deming' 
+                            ? 'Weights assigned per-sample based on MU band configuration.' 
+                            : `Standard Deming used. ${results?.regressionReason || ''}`}
+                        </p>
+                      </div>
+                    </div>
+
                     {/* Comparison Row Counts */}
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
                       <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Row Counts by Comparison</h4>

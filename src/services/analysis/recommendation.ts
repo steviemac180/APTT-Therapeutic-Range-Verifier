@@ -2,7 +2,8 @@ import { AnalysisResults, Range } from '../../types';
 
 export const generateRecommendations = (
   shifts: { lower: number; upper: number; width: number },
-  confidence: AnalysisResults['confidence']
+  confidence: AnalysisResults['confidence'],
+  misclassification: { improvement: number; weightedImprovement: number }
 ) => {
   let decision: AnalysisResults['decision'] = 'No change';
   
@@ -10,6 +11,12 @@ export const generateRecommendations = (
   const absUpper = Math.abs(shifts.upper);
 
   let interpretation = `The new lot shows a ${shifts.lower >= 0 ? 'positive' : 'negative'} shift of ${absLower.toFixed(1)}s at the lower limit and a ${shifts.upper >= 0 ? 'positive' : 'negative'} shift of ${absUpper.toFixed(1)}s at the upper limit. `;
+
+  if (misclassification.weightedImprovement > 0) {
+    interpretation += `The proposed range improves the weighted risk score by ${misclassification.weightedImprovement.toFixed(1)} units compared to the current range. `;
+  } else if (misclassification.weightedImprovement < 0) {
+    interpretation += `Caution: The proposed range increases the weighted risk score by ${Math.abs(misclassification.weightedImprovement).toFixed(1)} units. `;
+  }
 
   if (absLower > 5 || absUpper > 5) {
     decision = 'Major change';
