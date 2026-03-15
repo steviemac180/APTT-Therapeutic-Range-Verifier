@@ -95,20 +95,27 @@ export const runAnalysis = async (
   );
 
   // 6. Confidence & Recommendations
-  let confidence: AnalysisResults['confidence'] = 'High confidence';
-  if (activeData.length < 20) {
-    confidence = 'Low confidence';
-  } else if (activeData.length < 40) {
-    confidence = 'Moderate confidence';
-  }
+  const dataQuality = {
+    flags: summary.qc.flaggedUsableCount > 0 ? ['Data quality concerns were flagged during pre-analysis validation'] : [],
+    usableCount: activeData.length,
+    hasCensored: summary.qc.censoredCount > 0,
+    excludedComparisonsCount: comparisons.filter(c => !c.included).length
+  };
 
-  const { decision, interpretation } = generateRecommendations(shifts, confidence, misclassification);
+  const { decision, confidence, interpretation, warnings } = generateRecommendations(
+    shifts, 
+    misclassification,
+    { lowerShiftInterval, upperShiftInterval, widthShiftInterval },
+    dataQuality,
+    { method: newModel.method, reason: newModel.reason }
+  );
 
   return {
     summary,
     decision,
     confidence,
     interpretation,
+    warnings,
     proposedRange,
     currentLotPredicted,
     newLotPredicted,

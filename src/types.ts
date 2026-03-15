@@ -162,6 +162,7 @@ export interface AnalysisResults {
   };
   regressionMethod: 'Weighted Deming' | 'Standard Deming';
   regressionReason?: string;
+  warnings: string[];
   uncertainty: {
     lowerInterval: [number, number];
     upperInterval: [number, number];

@@ -1537,6 +1537,21 @@ export default function App() {
               {/* Main Content Area */}
               {dashboardTab === 'executive' ? (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  {/* Stability Banner */}
+                  {results?.warnings && results.warnings.length > 0 && (
+                    <div className="lg:col-span-3 bg-amber-50 border border-amber-200 rounded-2xl p-4 flex gap-4 items-start">
+                      <AlertTriangle className="text-amber-600 shrink-0" size={20} />
+                      <div className="space-y-1">
+                        <h5 className="text-sm font-bold text-amber-900">Analysis Stability Warnings</h5>
+                        <ul className="text-xs text-amber-800 list-disc list-inside space-y-0.5">
+                          {results.warnings.map((warning, idx) => (
+                            <li key={idx}>{warning}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Executive Decision Card */}
                   <div className={cn(
                     "lg:col-span-2 p-8 rounded-[32px] border shadow-sm flex flex-col justify-between min-h-[320px]",

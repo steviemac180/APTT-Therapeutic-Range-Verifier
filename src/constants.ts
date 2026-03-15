@@ -13,8 +13,8 @@ export const DEFAULT_RISK_WEIGHTS = {
 
 export const DEFAULT_MU_UNITS = {
   xa: 'SD' as const,
-  apttCurrent: 'CV%' as const,
-  apttNew: 'CV%' as const,
+  apttCurrent: 'SD' as const,
+  apttNew: 'SD' as const,
 };
 
 export const DEFAULT_MU_BANDS = (xaRange: { lower: number, upper: number }, apttRange: { lower: number, upper: number }) => ({
@@ -24,13 +24,13 @@ export const DEFAULT_MU_BANDS = (xaRange: { lower: number, upper: number }, aptt
     { lowerBound: xaRange.upper, upperBound: 2.0, value: 0.06 },
   ],
   apttCurrent: [
-    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0 },
-    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5 },
-    { lowerBound: apttRange.upper, upperBound: 200, value: 8 },
+    { lowerBound: 0, upperBound: apttRange.lower, value: 1.2 },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 1.2 },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 1.2 },
   ],
   apttNew: [
-    { lowerBound: 0, upperBound: apttRange.lower, value: 2.0 },
-    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 5 },
-    { lowerBound: apttRange.upper, upperBound: 200, value: 8 },
+    { lowerBound: 0, upperBound: apttRange.lower, value: 1.2 },
+    { lowerBound: apttRange.lower, upperBound: apttRange.upper, value: 1.2 },
+    { lowerBound: apttRange.upper, upperBound: 200, value: 1.2 },
   ],
 });
