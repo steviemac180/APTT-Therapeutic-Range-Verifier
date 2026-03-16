@@ -410,7 +410,10 @@ function DescriptiveDataOverview({ data, comparisons, config }: { data: Processe
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-12">
         <div className="space-y-8">
-          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">anti-Xa Distribution by Comparison</h5>
+          <div className="flex items-center gap-2 mb-4">
+            <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">anti-Xa Distribution by Comparison</h5>
+            <InfoTooltip content="Distribution of anti-Xa values across different comparisons. Used to verify that the sample population is consistent." />
+          </div>
           <div className="space-y-10">
             {comparisonStats.map(cs => (
               <div key={cs.id} className="space-y-2">
@@ -425,7 +428,10 @@ function DescriptiveDataOverview({ data, comparisons, config }: { data: Processe
         </div>
 
         <div className="space-y-8">
-          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">APTT New Lot Distribution by Comparison</h5>
+          <div className="flex items-center gap-2 mb-4">
+            <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">APTT New Lot Distribution by Comparison</h5>
+            <InfoTooltip content="Distribution of APTT values for the new reagent lot across different comparisons." />
+          </div>
           <div className="space-y-10">
             {comparisonStats.map(cs => (
               <div key={cs.id} className="space-y-2">
@@ -601,7 +607,10 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
             <History size={20} />
           </div>
           <div>
-            <h4 className="text-sm font-bold uppercase tracking-widest text-black/40">Trend / Temporal Signal Analysis</h4>
+            <div className="flex items-center gap-2">
+              <h4 className="text-sm font-bold uppercase tracking-widest text-black/40">Trend / Temporal Signal Analysis</h4>
+              <InfoTooltip content="Advanced signal detection to identify analytical drift or step-changes in reagent performance over time." />
+            </div>
             <p className="text-[10px] text-black/30 font-medium">Status: Not Assessable</p>
           </div>
         </div>
@@ -622,8 +631,11 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
           <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600">
             <Activity size={20} />
           </div>
-          <div>
-            <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Trend / Temporal Signal Analysis</h4>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Trend / Temporal Signal Analysis</h4>
+              <InfoTooltip content="Advanced signal detection to identify analytical drift or step-changes in reagent performance over time." />
+            </div>
             <div className="flex items-center gap-2 mt-1">
               <p className="text-[10px] text-black/40 font-bold uppercase tracking-widest">Status: Assessable</p>
               <span className="text-[10px] text-indigo-600 font-bold uppercase tracking-widest bg-indigo-50 px-2 py-0.5 rounded-md">
@@ -773,8 +785,11 @@ function MethodRobustnessPanel({ results }: { results: AnalysisResults }) {
           <div className="w-10 h-10 bg-purple-50 rounded-full flex items-center justify-center text-purple-600">
             <Beaker size={20} />
           </div>
-          <div>
-            <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Method Robustness / Sensitivity Analysis</h4>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Method Robustness / Sensitivity Analysis</h4>
+              <InfoTooltip content="Analysis of how the statistical model handles measurement uncertainty and clinical weighting." />
+            </div>
             <p className="text-xs text-black/40">Comparison of primary model against alternative regression methods.</p>
           </div>
         </div>
@@ -2930,9 +2945,13 @@ export default function App() {
                             "bg-slate-500"
                           )} />
                           <span className="text-xs font-bold uppercase tracking-widest opacity-60">Executive Recommendation</span>
+                          <InfoTooltip content="The primary automated recommendation based on statistical analysis of lot-to-lot shifts and clinical risk profiles." />
                         </div>
-                        <div className="px-4 py-1.5 bg-white/60 backdrop-blur-sm rounded-full border border-black/5 text-[10px] font-bold uppercase tracking-widest">
-                          {activeResults?.confidence}
+                        <div className="flex items-center gap-2">
+                          <div className="px-4 py-1.5 bg-white/60 backdrop-blur-sm rounded-full border border-black/5 text-[10px] font-bold uppercase tracking-widest">
+                            {activeResults?.confidence}
+                          </div>
+                          <InfoTooltip content="Statistical confidence level based on data density, correlation strength (R²), and bootstrap stability." />
                         </div>
                       </div>
                       
@@ -2946,10 +2965,12 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <div className="w-2 h-2 rounded-full bg-emerald-500" />
                         <span className="text-[10px] font-bold uppercase tracking-widest opacity-40">Deming Regression</span>
+                        <InfoTooltip content="Accounts for measurement error in both Anti-Xa and APTT variables." />
                       </div>
                       <div className="flex items-center gap-2">
                         <div className="w-2 h-2 rounded-full bg-blue-500" />
                         <span className="text-[10px] font-bold uppercase tracking-widest opacity-40">MU-Aware Engine</span>
+                        <InfoTooltip content="Incorporates Measurement Uncertainty to ensure range stability at clinical boundaries." />
                       </div>
                     </div>
                   </div>
@@ -2958,7 +2979,10 @@ export default function App() {
                   <div className="lg:col-span-3 space-y-8">
                     <div className="flex items-center gap-4 mb-2">
                       <div className="h-px flex-1 bg-black/5" />
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Historical & Trend Context</p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Historical & Trend Context</p>
+                        <InfoTooltip content="Visual comparison of current data against historical lot comparisons to identify long-term analytical drift or step-changes." />
+                      </div>
                       <div className="h-px flex-1 bg-black/5" />
                     </div>
                     
@@ -2979,7 +3003,10 @@ export default function App() {
                   {/* Range Card */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
                     <div>
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-6">Therapeutic APTT Range</h4>
+                      <div className="flex items-center gap-2 mb-6">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Therapeutic APTT Range</h4>
+                        <InfoTooltip content="Comparison between the currently approved clinical range and the statistically optimal range derived from the new lot data." />
+                      </div>
                       <div className="space-y-6">
                         <div className="flex items-center justify-between">
                           <span className="text-sm font-medium text-black/40">Current Approved</span>
@@ -3025,7 +3052,10 @@ export default function App() {
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm flex flex-col justify-between">
                     <div>
                       <div className="flex justify-between items-start mb-6">
-                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Misclassification Risk</h4>
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Misclassification Risk</h4>
+                          <InfoTooltip content="Estimated percentage of samples that would be incorrectly classified using the proposed range compared to the anti-Xa gold standard." />
+                        </div>
                         <span className={cn(
                           "text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full",
                           activeResults?.misclassification.improvement! > 0 ? "bg-emerald-100 text-emerald-700" : 
@@ -3144,7 +3174,10 @@ export default function App() {
 
                   {/* Lot Comparison Card */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-6">
-                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Model Predicted Limits</h4>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Model Predicted Limits</h4>
+                      <InfoTooltip content="The exact APTT values that correspond to the therapeutic anti-Xa boundaries based on the regression model." />
+                    </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-4">
                         <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Current Lot</p>
@@ -3171,7 +3204,10 @@ export default function App() {
                   {/* Uncertainty Summary Card */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
                     <div className="flex justify-between items-start">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Bootstrap Uncertainty (95% CI)</h4>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Bootstrap Uncertainty (95% CI)</h4>
+                        <InfoTooltip content="95% Confidence Intervals generated via 1000+ bootstrap iterations to quantify the stability of the proposed limits." />
+                      </div>
                       <span className="text-[10px] font-bold text-black/30 uppercase tracking-widest">{activeResults?.uncertainty.iterations} Iterations</span>
                     </div>
                     
@@ -3219,7 +3255,10 @@ export default function App() {
 
                   {/* Range Comparison Visual with Intervals */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8 col-span-1 md:col-span-2">
-                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Range Stability & Uncertainty</h4>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Range Stability & Uncertainty</h4>
+                      <InfoTooltip content="Visual representation of the proposed range (solid bar) and its statistical uncertainty (blurred shadows)." />
+                    </div>
                     
                     <div className="relative h-48 flex flex-col justify-center gap-12">
                       {/* Scale Max Calculation */}
@@ -3302,8 +3341,11 @@ export default function App() {
                   {/* Regression Visualization */}
                   <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm">
                     <div className="flex items-center justify-between mb-8">
-                      <div>
-                        <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Regression Analysis</h4>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Regression Analysis</h4>
+                          <InfoTooltip content="Deming regression accounts for measurement error in both variables, providing a more robust relationship model than standard linear regression." />
+                        </div>
                         <p className="text-xs text-black/40">Correlation between Anti-Xa and New Lot APTT.</p>
                       </div>
                       <div className="text-right">
@@ -3323,8 +3365,11 @@ export default function App() {
                   {/* Simulation Tool */}
                   <div className="lg:col-span-3 bg-white p-8 rounded-[32px] border border-black/5 shadow-sm">
                     <div className="flex items-center justify-between mb-8">
-                      <div>
-                        <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Proposed Range Simulation</h4>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Proposed Range Simulation</h4>
+                          <InfoTooltip content="Interactive tool to manually test different range boundaries and observe the immediate impact on misclassification risk." />
+                        </div>
                         <p className="text-xs text-black/40">Adjust limits to see real-time impact on misclassification and risk.</p>
                       </div>
                       <div className="flex gap-2">
@@ -3440,7 +3485,10 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     {/* Regression Method */}
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Regression Engine</h4>
+                      <div className="flex items-center gap-2 mb-4">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Regression Engine</h4>
+                        <InfoTooltip content="The statistical model used to calculate the relationship between Anti-Xa and APTT. Weighted Deming is preferred as it accounts for clinical risk at range boundaries." />
+                      </div>
                       <div className="space-y-2">
                         <p className="text-sm font-bold text-black">{activeResults?.regressionMethod}</p>
                         <p className="text-[10px] text-black/40 leading-relaxed">
@@ -3453,7 +3501,10 @@ export default function App() {
 
                     {/* Comparison Row Counts */}
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Row Counts by Comparison</h4>
+                      <div className="flex items-center gap-2 mb-4">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Row Counts by Comparison</h4>
+                        <InfoTooltip content="Number of valid data points used for each comparison. Higher counts increase statistical power." />
+                      </div>
                       <div className="space-y-3">
                         {activeResults?.summary.comparisons.map(c => (
                           <div key={c.id} className="flex justify-between items-center">
@@ -3468,7 +3519,10 @@ export default function App() {
 
                     {/* QC & Censoring */}
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">QC & Censoring Summary</h4>
+                      <div className="flex items-center gap-2 mb-4">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">QC & Censoring Summary</h4>
+                        <InfoTooltip content="Summary of data quality checks. Censored values are those outside the analytical measurement range which are capped to prevent model distortion." />
+                      </div>
                       <div className="space-y-3">
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Total Usable Rows</span>
@@ -3487,7 +3541,10 @@ export default function App() {
 
                     {/* Paired Differences */}
                     <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">Paired Differences (Current - New)</h4>
+                      <div className="flex items-center gap-2 mb-4">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Paired Differences (Current - New)</h4>
+                        <InfoTooltip content="Direct comparison of Current vs New lot APTT values for the same sample. Helps identify systematic bias independent of the Anti-Xa relationship." />
+                      </div>
                       <div className="space-y-3">
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-black/60">Mean Difference</span>
@@ -3511,8 +3568,9 @@ export default function App() {
 
                   {/* Distribution Tables */}
                   <div className="bg-white rounded-[32px] border border-black/5 shadow-sm overflow-hidden">
-                    <div className="px-8 py-6 border-b border-black/5 bg-black/[0.01]">
+                    <div className="px-8 py-6 border-b border-black/5 bg-black/[0.01] flex items-center gap-2">
                       <h4 className="text-xs font-bold uppercase tracking-widest text-black/40">Distribution Statistics</h4>
+                      <InfoTooltip content="Summary statistics for all included data points across the three primary variables." />
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">
@@ -3584,7 +3642,10 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                     {/* Side-by-Side Range Comparison */}
                     <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-6">
-                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Proposed Range Comparison</h4>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Proposed Range Comparison</h4>
+                        <InfoTooltip content="Direct comparison of the range proposed by the MU-Aware engine versus a standard unweighted model." />
+                      </div>
                       <div className="grid grid-cols-2 gap-8">
                         <div className="space-y-4">
                           <p className="text-[10px] font-bold uppercase tracking-widest text-blue-600/60">MU-Aware (Weighted)</p>
