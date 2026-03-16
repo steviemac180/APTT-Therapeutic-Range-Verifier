@@ -56,7 +56,9 @@ import {
   Range,
   Comparison,
   SetupStep,
-  ConfusionMatrix
+  ConfusionMatrix,
+  SummaryResults,
+  ReportCommentary
 } from './types';
 import { 
   DEFAULT_XA_RANGE, 
@@ -65,13 +67,76 @@ import {
   DEFAULT_MU_UNITS,
   DEFAULT_RISK_WEIGHTS 
 } from './constants';
-import { parseCSV, validateDataQuality, detectComparisons, getComparisonsSummary, exportProcessedDataToCSV } from './services/dataService';
+import { 
+  parseCSV, 
+  validateDataQuality, 
+  detectComparisons, 
+  getComparisonsSummary, 
+  exportProcessedDataToCSV,
+  exportDecisionTableToCSV,
+  exportKeyOutputsToCSV
+} from './services/dataService';
 import { runAnalysis } from './services/statsService';
 import { calculateSingleRangeMisclassification } from './services/analysis/misclassification';
+import { getDemoData, DemoScenario } from './services/demoData';
 
 // Utility for tailwind classes
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+function InfoTooltip({ title, content }: { title?: string, content: string }) {
+  return (
+    <div className="group relative inline-block ml-1 align-middle">
+      <Info size={12} className="text-black/30 hover:text-black/60 cursor-help transition-colors" />
+      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-black text-white rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-all z-50 shadow-2xl border border-white/10">
+        {title && <div className="text-[9px] font-bold uppercase tracking-widest text-white/40 mb-1">{title}</div>}
+        <div className="text-[10px] leading-relaxed font-medium">{content}</div>
+        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-black" />
+      </div>
+    </div>
+  );
+}
+
+function generateAssumptionsAndLimitations(results: AnalysisResults, config: AnalysisConfig) {
+  const assumptions = [
+    "The relationship between Anti-Xa and APTT is assumed to be linear within the therapeutic range.",
+    "The Anti-Xa assay is considered the gold standard reference for heparin monitoring.",
+    `Measurement uncertainty is applied based on ${config.muUnits.xa} for Xa and ${config.muUnits.apttNew} for APTT.`
+  ];
+
+  if (config.includeMU) {
+    assumptions.push("Proposed ranges incorporate Measurement Uncertainty to minimize clinical risk at boundaries.");
+  }
+
+  const limitations = [];
+  
+  if (results.regressionModel.r2 < 0.85) {
+    limitations.push("Lower correlation (R² < 0.85) suggests significant biological or analytical variance in the dataset.");
+  }
+  
+  if (results.summary.qc.censoredCount > 0) {
+    limitations.push("Dataset contains capped/censored values which may bias the regression slope if concentrated at range boundaries.");
+  }
+
+  if (results.sensitivityAnalysis && !results.sensitivityAnalysis.overallAgreement) {
+    limitations.push("Methodological variance detected: different regression models yield significantly different proposed ranges.");
+  }
+
+  if (results.summary.xa.count < 30) {
+    limitations.push("Small sample size (n < 30) increases the risk of sampling bias and wider uncertainty intervals.");
+  }
+
+  if (!config.includeMU) {
+    limitations.push("Analysis excludes Measurement Uncertainty; clinical decisions near range boundaries may carry higher risk.");
+  }
+
+  // Check for extreme risk weights
+  if (config.riskWeights.subToSupra > 5 || config.riskWeights.supraToSub > 5) {
+    limitations.push("High risk weighting applied to major misclassifications; results are heavily biased towards safety over sensitivity.");
+  }
+
+  return { assumptions, limitations };
 }
 
 type AppState = 'setup' | 'dashboard';
@@ -354,6 +419,89 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
   );
 }
 
+function MethodRobustnessPanel({ results }: { results: AnalysisResults }) {
+  const sensitivity = results.sensitivityAnalysis;
+  if (!sensitivity || !sensitivity.enabled) return null;
+
+  return (
+    <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-purple-50 rounded-full flex items-center justify-center text-purple-600">
+            <Beaker size={20} />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Method Robustness / Sensitivity Analysis</h4>
+            <p className="text-xs text-black/40">Comparison of primary model against alternative regression methods.</p>
+          </div>
+        </div>
+        {!sensitivity.overallAgreement && (
+          <div className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-xl border border-red-100">
+            <AlertTriangle size={16} />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Material Disagreement Detected</span>
+          </div>
+        )}
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-black/5">
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40">Regression Method</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Proposed Range</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Width</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Slope</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Agreement</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-black/5">
+            <tr className="bg-emerald-50/30">
+              <td className="py-4 text-xs font-bold text-black flex items-center gap-2">
+                {results.regressionMethod} <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 text-[8px] rounded uppercase">Primary</span>
+              </td>
+              <td className="py-4 text-xs font-mono text-center font-bold">{results.proposedRange.lower} – {results.proposedRange.upper}s</td>
+              <td className="py-4 text-xs font-mono text-center">{(results.proposedRange.upper - results.proposedRange.lower).toFixed(1)}s</td>
+              <td className="py-4 text-xs font-mono text-center">{results.regressionModel.slope.toFixed(3)}</td>
+              <td className="py-4 text-center">
+                <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[8px] font-bold uppercase rounded-lg">Reference</span>
+              </td>
+            </tr>
+            {sensitivity.results.map((res, i) => (
+              <tr key={i}>
+                <td className="py-4 text-xs font-medium text-black/60">{res.method}</td>
+                <td className="py-4 text-xs font-mono text-center">{res.proposedRange.lower} – {res.proposedRange.upper}s</td>
+                <td className="py-4 text-xs font-mono text-center">{res.width.toFixed(1)}s</td>
+                <td className="py-4 text-xs font-mono text-center">{res.slope.toFixed(3)}</td>
+                <td className="py-4 text-center">
+                  <span className={cn(
+                    "px-2 py-1 text-[8px] font-bold uppercase rounded-lg",
+                    res.agreement === 'Agree' ? "bg-emerald-50 text-emerald-600" :
+                    res.agreement === 'Minor Disagreement' ? "bg-amber-50 text-amber-600" :
+                    "bg-red-50 text-red-600"
+                  )}>
+                    {res.agreement}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {!sensitivity.overallAgreement && (
+        <div className="p-6 bg-red-50 rounded-2xl border border-red-100 space-y-2">
+          <h5 className="text-xs font-bold text-red-900 uppercase tracking-widest">Caution: Methodological Variance</h5>
+          <p className="text-xs text-red-800/70 leading-relaxed">
+            {sensitivity.disagreementReason}. The primary regression model produces results that differ significantly from alternative statistical methods. 
+            This often occurs in datasets with high leverage points, non-linear relationships, or significant outliers. 
+            Manual verification of the regression plots for all methods is strongly recommended.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>('setup');
   const [dashboardTab, setDashboardTab] = useState<'executive' | 'technical' | 'comparison'>('executive');
@@ -408,6 +556,7 @@ export default function App() {
     muUnits: DEFAULT_MU_UNITS,
     analysisDepth: 'Standard',
     includeMU: true,
+    enableSensitivityAnalysis: false,
     riskWeights: DEFAULT_RISK_WEIGHTS
   });
 
@@ -415,8 +564,16 @@ export default function App() {
   const [resultsNoMU, setResultsNoMU] = useState<AnalysisResults | null>(null);
   const [useMU, setUseMU] = useState(true);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [demoScenario, setDemoScenario] = useState<DemoScenario>('no_change');
   const [showConfusionMatrix, setShowConfusionMatrix] = useState(false);
   const [showSimulation, setShowSimulation] = useState(false);
+  const [showReportEditor, setShowReportEditor] = useState(false);
+  const [reportCommentary, setReportCommentary] = useState<ReportCommentary>({
+    executiveSummary: "The validation study for the new APTT reagent lot demonstrates acceptable correlation with the anti-Xa therapeutic range. The proposed therapeutic range maintains clinical safety while optimizing sensitivity to heparin therapy.",
+    medicalDirectorNotes: "Based on the statistical analysis and misclassification risk assessment, the proposed range is approved for clinical use. No significant shift in clinical decision-making is expected.",
+    technicalNotes: "The method comparison was performed using a representative sample set across the therapeutic spectrum. Quality control data and uncertainty of measurement were within acceptable laboratory limits.",
+    limitationsNotes: "This analysis is based on the provided dataset. Results should be interpreted in the context of clinical presentation and other coagulation parameters."
+  });
   const [simulatedRange, setSimulatedRange] = useState<Range | null>(null);
 
   const activeResults = useMU ? results : resultsNoMU;
@@ -643,91 +800,19 @@ export default function App() {
   };
 
   const startDemo = () => {
-    // Mock demo data across 3 years with linked lots
-    const demoData: ProcessedDataRow[] = [];
+    const { data, summary, labConfig: demoLab, analysisConfig: demoAnalysis } = getDemoData(demoScenario);
     
-    // Year 2023: Lot A vs Lot B
-    for (let i = 0; i < 20; i++) {
-      const xa = 0.1 + Math.random() * 1.2;
-      demoData.push({
-        id: `demo-2023-${i}`,
-        year: 2023,
-        xa: xa,
-        apttCurrent: 30 + (xa * 35) + Math.random() * 4,
-        apttNew: 32 + (xa * 36) + Math.random() * 4,
-        currentLotId: 'LOT-A',
-        newLotId: 'LOT-B',
-        excluded: false,
-        flags: [],
-        isHeaderDuplicate: false,
-        isUsable: true,
-        rawValues: {}
-      });
-    }
-
-    // Year 2024: Lot B vs Lot C (Linked!)
-    for (let i = 0; i < 20; i++) {
-      const xa = 0.1 + Math.random() * 1.2;
-      demoData.push({
-        id: `demo-2024-${i}`,
-        year: 2024,
-        xa: xa,
-        apttCurrent: 32 + (xa * 36) + Math.random() * 4,
-        apttNew: 35 + (xa * 38) + Math.random() * 4,
-        currentLotId: 'LOT-B',
-        newLotId: 'LOT-C',
-        excluded: false,
-        flags: [],
-        isHeaderDuplicate: false,
-        isUsable: true,
-        rawValues: {}
-      });
-    }
-
-    // Year 2025: Lot C vs Lot D (Linked!)
-    for (let i = 0; i < 20; i++) {
-      const xa = 0.1 + Math.random() * 1.2;
-      const isCapped = i > 17; // Fewer capped values for better demo
-      const apttNewBase = 35 + (xa * 38) + Math.random() * 4;
-      demoData.push({
-        id: `demo-2025-${i}`,
-        year: 2025,
-        xa: xa,
-        apttCurrent: 35 + (xa * 38) + Math.random() * 4,
-        apttNew: isCapped ? 140 : apttNewBase,
-        currentLotId: 'LOT-C',
-        newLotId: 'LOT-D',
-        excluded: false,
-        flags: isCapped ? ['Capped APTT value (>= 139.0)'] : [],
-        isHeaderDuplicate: false,
-        isUsable: true,
-        rawValues: {}
-      });
-    }
-
-    setRawData(demoData);
-    const { comparisons: detected, updatedData } = detectComparisons(demoData);
+    setRawData(data);
+    setFileSummary(summary);
+    setLabConfig(demoLab);
+    setAnalysisConfig(demoAnalysis);
+    
+    // Auto-detect comparisons for the demo data
+    const { updatedData } = detectComparisons(data);
     setRawData(updatedData);
-    setAnalysisConfig(prev => ({
-      ...prev,
-      currentApprovedRange: { lower: 40, upper: 55 }
-    }));
-    setFileSummary({
-      totalRows: 60,
-      usableRows: 60,
-      flaggedRows: 4,
-      excludedRows: 0,
-      issueCounts: {
-        missingValues: 0,
-        nonNumeric: 0,
-        headerDuplicates: 0,
-        cappedValues: 4
-      },
-      missingRequiredColumns: [],
-      detectedColumns: ['Year', 'Xa', 'APTT New Lot', 'APTT Current Lot', 'New Lot ID', 'Current Lot ID'],
-      hasRequiredColumns: true
-    });
-    setSetupStep('config');
+    
+    // Smooth transition to setup wizard
+    setSetupStep('comparison');
   };
 
   const handleRunAnalysis = async () => {
@@ -785,7 +870,7 @@ export default function App() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="max-w-3xl mx-auto"
+              className="max-w-3xl mx-auto no-print"
             >
               {/* Wizard Progress */}
               <div className="mb-12 flex justify-between relative">
@@ -852,16 +937,14 @@ export default function App() {
                           Try Demo Mode
                         </button>
                         <select 
-                          className="w-full text-[10px] uppercase font-bold tracking-widest text-black/40 bg-transparent border-none focus:ring-0 text-center"
-                          onChange={(e) => {
-                            // In a real app, this would set a scenario flag
-                            startDemo();
-                          }}
+                          className="w-full text-[10px] uppercase font-bold tracking-widest text-black/40 bg-transparent border-none focus:ring-0 text-center cursor-pointer hover:text-black/60 transition-colors"
+                          value={demoScenario}
+                          onChange={(e) => setDemoScenario(e.target.value as DemoScenario)}
                         >
-                          <option>Scenario: No Change</option>
-                          <option>Scenario: Minor Change</option>
-                          <option>Scenario: Major Change</option>
-                          <option>Scenario: Review Required</option>
+                          <option value="no_change">Scenario: No Change</option>
+                          <option value="minor_change">Scenario: Minor Change</option>
+                          <option value="major_change">Scenario: Major Change</option>
+                          <option value="review_required">Scenario: Review Required</option>
                         </select>
                       </div>
                     </div>
@@ -1294,7 +1377,10 @@ export default function App() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                       <div className="space-y-6">
                         <div className="flex items-center justify-between">
-                          <h3 className="text-xs font-bold uppercase tracking-widest text-black/40">Current APTT Range (sec)</h3>
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-black/40">
+                            Current APTT Range (sec)
+                            <InfoTooltip content="The therapeutic range currently in use for the existing lot." />
+                          </h3>
                         </div>
                         <div className="flex gap-4">
                           <div className="flex-1">
@@ -1326,7 +1412,10 @@ export default function App() {
 
                       <div className="space-y-6">
                         <div className="flex items-center justify-between">
-                          <h3 className="text-xs font-bold uppercase tracking-widest text-black/40">Therapeutic anti-Xa Range</h3>
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-black/40">
+                            Therapeutic anti-Xa Range
+                            <InfoTooltip content="The clinical reference range for heparin monitoring (usually 0.3-0.7 IU/mL)." />
+                          </h3>
                           <div className="flex gap-2">
                             {[
                               { label: '0.3–0.7', range: { lower: 0.3, upper: 0.7 } },
@@ -1384,13 +1473,10 @@ export default function App() {
                     <div className="pt-10 border-t border-black/5">
                       <div className="flex items-center gap-2 mb-6">
                         <h3 className="text-xs font-bold uppercase tracking-widest text-black/40">Advanced Risk Weights</h3>
-                        <div className="group relative inline-block">
-                          <Info size={14} className="text-black/20 hover:text-black/40 cursor-help" />
-                          <div className="absolute bottom-full left-0 mb-2 w-64 p-3 bg-black text-white text-[10px] rounded-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
-                            Risk weights determine how heavily different misclassification errors impact the final decision. Higher values indicate more critical errors.
-                            <div className="absolute top-full left-4 border-4 border-transparent border-t-black" />
-                          </div>
-                        </div>
+                        <InfoTooltip 
+                          title="Risk Weights" 
+                          content="Risk weights determine how heavily different misclassification errors impact the final decision. Higher values indicate more critical errors." 
+                        />
                         <button 
                           onClick={restoreDefaultRiskWeights}
                           className="ml-auto text-[10px] font-bold uppercase tracking-widest text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
@@ -1455,13 +1541,10 @@ export default function App() {
                           <div className="flex items-center gap-2">
                             <Beaker size={18} className="text-emerald-600" />
                             <h3 className="text-sm font-bold uppercase tracking-widest text-emerald-800">anti-Xa MU Bands</h3>
-                            <div className="group relative inline-block">
-                              <Info size={14} className="text-emerald-400 hover:text-emerald-600 cursor-help" />
-                              <div className="absolute bottom-full left-0 mb-2 w-64 p-3 bg-black text-white text-[10px] rounded-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
-                                Enter the Measurement Uncertainty (MU) for each range. SD is used for lower values, CV% for higher values.
-                                <div className="absolute top-full left-4 border-4 border-transparent border-t-black" />
-                              </div>
-                            </div>
+                            <InfoTooltip 
+                              title="anti-Xa Measurement Uncertainty" 
+                              content="Enter the MU for each range. SD is typically used for lower values (< 0.10), while CV% is used for higher values." 
+                            />
                           </div>
                           <div className="flex bg-white rounded-xl p-1 border border-emerald-100 shadow-sm">
                             {(['SD', 'CV%'] as const).map(u => (
@@ -1521,7 +1604,13 @@ export default function App() {
                         {/* Current Lot */}
                         <div className="p-6 bg-blue-50/50 rounded-3xl border border-blue-100">
                           <div className="flex items-center justify-between mb-6">
-                            <h3 className="text-sm font-bold uppercase tracking-widest text-blue-800">APTT Current Lot MU</h3>
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-sm font-bold uppercase tracking-widest text-blue-800">APTT Current Lot MU</h3>
+                              <InfoTooltip 
+                                title="Current Lot MU" 
+                                content="Measurement uncertainty for the current APTT reagent lot. This is used to calculate the 'MU-Adjusted' therapeutic range." 
+                              />
+                            </div>
                             <div className="flex bg-white rounded-xl p-1 border border-blue-100 shadow-sm">
                               {(['SD', 'CV%'] as const).map(u => (
                                 <button
@@ -1573,7 +1662,13 @@ export default function App() {
                         {/* New Lot */}
                         <div className="p-6 bg-purple-50/50 rounded-3xl border border-purple-100">
                           <div className="flex items-center justify-between mb-6">
-                            <h3 className="text-sm font-bold uppercase tracking-widest text-purple-800">APTT New Lot MU</h3>
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-sm font-bold uppercase tracking-widest text-purple-800">APTT New Lot MU</h3>
+                              <InfoTooltip 
+                                title="New Lot MU" 
+                                content="Measurement uncertainty for the new APTT reagent lot. This helps predict how the new lot will perform relative to the current lot." 
+                              />
+                            </div>
                             <div className="flex bg-white rounded-xl p-1 border border-purple-100 shadow-sm">
                               {(['SD', 'CV%'] as const).map(u => (
                                 <button
@@ -1659,9 +1754,15 @@ export default function App() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {/* Data Audit Card */}
                       <div className="p-6 bg-[#F5F5F4] rounded-3xl border border-black/5 space-y-6">
-                        <h3 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
-                          <FileText size={14} /> Data Audit
-                        </h3>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
+                            <FileText size={14} /> Data Audit
+                          </h3>
+                          <InfoTooltip 
+                            title="Data Audit" 
+                            content="A summary of the dataset quality. Usable rows are those with both valid anti-Xa and APTT results." 
+                          />
+                        </div>
                         <div className="grid grid-cols-2 gap-4">
                           <div>
                             <p className="text-[10px] font-bold text-black/40 uppercase tracking-tighter">Uploaded Rows</p>
@@ -1708,9 +1809,15 @@ export default function App() {
 
                       {/* Configuration Audit Card */}
                       <div className="p-6 bg-[#F5F5F4] rounded-3xl border border-black/5 space-y-6">
-                        <h3 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
-                          <Settings size={14} /> Clinical Parameters
-                        </h3>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
+                            <Settings size={14} /> Clinical Parameters
+                          </h3>
+                          <InfoTooltip 
+                            title="Clinical Parameters" 
+                            content="The reference ranges and risk weights that will be used for the final analysis." 
+                          />
+                        </div>
                         <div className="space-y-4">
                           <div className="grid grid-cols-2 gap-4">
                             <div className="bg-white/50 p-3 rounded-2xl border border-black/5">
@@ -1724,6 +1831,21 @@ export default function App() {
                           </div>
 
                           <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <p className="text-[10px] font-bold text-black/40 uppercase tracking-tighter">Sensitivity Analysis</p>
+                              <button 
+                                onClick={() => setAnalysisConfig(prev => ({ ...prev, enableSensitivityAnalysis: !prev.enableSensitivityAnalysis }))}
+                                className={cn(
+                                  "px-2 py-1 rounded-lg text-[8px] font-bold uppercase tracking-widest transition-all border",
+                                  analysisConfig.enableSensitivityAnalysis 
+                                    ? "bg-purple-50 border-purple-200 text-purple-700" 
+                                    : "bg-slate-50 border-slate-200 text-slate-500"
+                                )}
+                              >
+                                {analysisConfig.enableSensitivityAnalysis ? 'Sensitivity Enabled' : 'Sensitivity Disabled'}
+                              </button>
+                            </div>
+
                             <div className="flex items-center justify-between">
                               <p className="text-[10px] font-bold text-black/40 uppercase tracking-tighter">MU Configuration</p>
                               <button 
@@ -1828,7 +1950,7 @@ export default function App() {
               key="dashboard"
               initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
-              className="space-y-8"
+              className="space-y-8 no-print"
             >
               {/* Dashboard Header */}
               <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
@@ -1905,10 +2027,33 @@ export default function App() {
                   >
                     <Beaker size={20} /> Simulation
                   </button>
-                  <button className="bg-white border border-black/10 hover:border-black/20 text-black font-semibold py-3 px-6 rounded-2xl transition-all flex items-center gap-2">
-                    <Download size={20} /> Export CSV
-                  </button>
-                  <button className="bg-black text-white font-semibold py-3 px-8 rounded-2xl hover:bg-black/80 transition-all flex items-center gap-2 shadow-lg shadow-black/10">
+                  <div className="flex items-center gap-2 bg-white border border-black/10 p-1 rounded-2xl">
+                    <button 
+                      onClick={() => exportProcessedDataToCSV(rawData, comparisons)}
+                      className="hover:bg-black/5 text-black font-semibold py-2 px-4 rounded-xl transition-all flex items-center gap-2 text-sm"
+                      title="Export Processed Dataset"
+                    >
+                      <Download size={16} /> Dataset
+                    </button>
+                    <button 
+                      onClick={() => activeResults && exportDecisionTableToCSV(activeResults)}
+                      className="hover:bg-black/5 text-black font-semibold py-2 px-4 rounded-xl transition-all flex items-center gap-2 text-sm border-l border-black/5"
+                      title="Export Decision Table"
+                    >
+                      <TrendingUp size={16} /> Decisions
+                    </button>
+                    <button 
+                      onClick={() => activeResults && exportKeyOutputsToCSV(activeResults, analysisConfig)}
+                      className="hover:bg-black/5 text-black font-semibold py-2 px-4 rounded-xl transition-all flex items-center gap-2 text-sm border-l border-black/5"
+                      title="Export Key Outputs"
+                    >
+                      <Activity size={16} /> Key Stats
+                    </button>
+                  </div>
+                  <button 
+                    onClick={() => setShowReportEditor(true)}
+                    className="bg-black text-white font-semibold py-3 px-8 rounded-2xl hover:bg-black/80 transition-all flex items-center gap-2 shadow-lg shadow-black/10"
+                  >
                     <FileText size={20} /> Generate Report
                   </button>
                 </div>
@@ -2079,6 +2224,41 @@ export default function App() {
                             <li key={idx}>{warning}</li>
                           ))}
                         </ul>
+                      </div>
+                      {/* Assumptions & Limitations */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-8 border-t border-black/5">
+                        <div className="space-y-4">
+                          <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
+                            Key Assumptions
+                            <InfoTooltip content="Fundamental premises upon which this statistical model is built." />
+                          </h4>
+                          <ul className="space-y-3">
+                            {generateAssumptionsAndLimitations(activeResults, analysisConfig).assumptions.map((item, i) => (
+                              <li key={i} className="flex gap-3 text-xs text-black/60 leading-relaxed">
+                                <div className="w-1 h-1 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                                {item}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div className="space-y-4">
+                          <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
+                            Limitations & Cautions
+                            <InfoTooltip content="Factors that may limit the generalisability or accuracy of these findings." />
+                          </h4>
+                          <ul className="space-y-3">
+                            {generateAssumptionsAndLimitations(activeResults, analysisConfig).limitations.length > 0 ? (
+                              generateAssumptionsAndLimitations(activeResults, analysisConfig).limitations.map((item, i) => (
+                                <li key={i} className="flex gap-3 text-xs text-black/60 leading-relaxed">
+                                  <div className="w-1 h-1 rounded-full bg-amber-400 mt-1.5 shrink-0" />
+                                  {item}
+                                </li>
+                              ))
+                            ) : (
+                              <li className="text-xs text-black/30 italic">No significant limitations identified for this dataset.</li>
+                            )}
+                          </ul>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2658,6 +2838,7 @@ export default function App() {
                   </div>
 
                   {activeResults && <TemporalSignalPanel results={activeResults} />}
+                  {activeResults && <MethodRobustnessPanel results={activeResults} />}
 
                   <div className="bg-amber-50 border border-amber-100 p-6 rounded-2xl flex gap-4">
                     <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center text-amber-600 shrink-0">
@@ -2782,7 +2963,7 @@ export default function App() {
       </main>
       
       {/* Footer */}
-      <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-black/5 flex flex-col md:flex-row justify-between items-center gap-6 opacity-40">
+      <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-black/5 flex flex-col md:flex-row justify-between items-center gap-6 opacity-40 no-print">
         <p className="text-xs font-medium">© 2026 APTT Therapeutic Range Verifier. All calculations performed locally.</p>
         <div className="flex gap-6 text-xs font-bold uppercase tracking-widest">
           <a href="#" className="hover:text-black transition-colors">Documentation</a>
@@ -2790,6 +2971,376 @@ export default function App() {
           <a href="#" className="hover:text-black transition-colors">Support</a>
         </div>
       </footer>
+
+      <ReportEditorModal 
+        isOpen={showReportEditor}
+        onClose={() => setShowReportEditor(false)}
+        commentary={reportCommentary}
+        onUpdate={setReportCommentary}
+        onPrint={() => {
+          setShowReportEditor(false);
+          setTimeout(() => window.print(), 100);
+        }}
+      />
+
+      {activeResults && (
+        <PrintReport 
+          results={activeResults}
+          config={analysisConfig}
+          commentary={reportCommentary}
+          rawData={rawData}
+          comparisons={comparisons}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReportEditorModal({ 
+  isOpen, 
+  onClose, 
+  commentary, 
+  onUpdate,
+  onPrint
+}: { 
+  isOpen: boolean; 
+  onClose: () => void; 
+  commentary: ReportCommentary;
+  onUpdate: (newCommentary: ReportCommentary) => void;
+  onPrint: () => void;
+}) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm no-print">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="bg-white w-full max-w-4xl max-h-[90vh] rounded-[40px] shadow-2xl overflow-hidden flex flex-col"
+      >
+        <div className="p-8 border-b border-black/5 flex items-center justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight">Report Commentary</h2>
+            <p className="text-xs text-black/40 uppercase font-bold tracking-widest mt-1">Customize narrative sections before generation</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-black/5 rounded-full transition-colors">
+            <Plus className="rotate-45" size={24} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8 space-y-8">
+          <div className="space-y-4">
+            <label className="text-[10px] uppercase font-bold text-black/40 tracking-widest">Executive Summary</label>
+            <textarea 
+              value={commentary.executiveSummary}
+              onChange={(e) => onUpdate({ ...commentary, executiveSummary: e.target.value })}
+              className="w-full h-32 bg-[#F5F5F4] border-none rounded-2xl p-4 text-sm font-medium focus:ring-2 focus:ring-black transition-all"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="space-y-4">
+              <label className="text-[10px] uppercase font-bold text-black/40 tracking-widest">Medical Director Notes</label>
+              <textarea 
+                value={commentary.medicalDirectorNotes}
+                onChange={(e) => onUpdate({ ...commentary, medicalDirectorNotes: e.target.value })}
+                className="w-full h-48 bg-[#F5F5F4] border-none rounded-2xl p-4 text-sm font-medium focus:ring-2 focus:ring-black transition-all"
+              />
+            </div>
+            <div className="space-y-4">
+              <label className="text-[10px] uppercase font-bold text-black/40 tracking-widest">Technical & QC Notes</label>
+              <textarea 
+                value={commentary.technicalNotes}
+                onChange={(e) => onUpdate({ ...commentary, technicalNotes: e.target.value })}
+                className="w-full h-48 bg-[#F5F5F4] border-none rounded-2xl p-4 text-sm font-medium focus:ring-2 focus:ring-black transition-all"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <label className="text-[10px] uppercase font-bold text-black/40 tracking-widest">Assumptions & Limitations</label>
+            <textarea 
+              value={commentary.limitationsNotes}
+              onChange={(e) => onUpdate({ ...commentary, limitationsNotes: e.target.value })}
+              className="w-full h-32 bg-[#F5F5F4] border-none rounded-2xl p-4 text-sm font-medium focus:ring-2 focus:ring-black transition-all"
+            />
+          </div>
+        </div>
+
+        <div className="p-8 border-t border-black/5 bg-[#F5F5F4]/50 flex justify-end gap-4">
+          <button 
+            onClick={onClose}
+            className="px-6 py-3 text-sm font-bold uppercase tracking-widest text-black/40 hover:text-black transition-colors"
+          >
+            Cancel
+          </button>
+          <button 
+            onClick={onPrint}
+            className="bg-black text-white font-bold py-3 px-10 rounded-2xl hover:bg-black/80 transition-all flex items-center gap-2 shadow-lg shadow-black/10"
+          >
+            <FileText size={20} /> Finalize & Print
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function PrintReport({ 
+  results, 
+  config, 
+  commentary, 
+  rawData, 
+  comparisons 
+}: { 
+  results: AnalysisResults; 
+  config: AnalysisConfig; 
+  commentary: ReportCommentary;
+  rawData: ProcessedDataRow[];
+  comparisons: Comparison[];
+}) {
+  return (
+    <div className="print-only bg-white text-black p-8 font-sans">
+      {/* Medical Director Report */}
+      <section className="space-y-8">
+        <div className="flex justify-between items-start border-b-2 border-black pb-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tighter">Medical Director Validation Report</h1>
+            <p className="text-sm font-bold uppercase tracking-widest text-black/60">APTT Therapeutic Range Verification</p>
+          </div>
+          <div className="text-right">
+            <p className="text-xs font-bold uppercase tracking-widest">Date: {new Date().toLocaleDateString()}</p>
+            <p className="text-xs font-bold uppercase tracking-widest">Status: FINAL</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-8">
+          <div className="col-span-2 space-y-6">
+            <div>
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Executive Summary</h2>
+              <p className="text-sm leading-relaxed">{commentary.executiveSummary}</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-6">
+              <div className="bg-black/5 p-4 rounded-2xl">
+                <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-2">Decision Category</h3>
+                <div className="flex items-center gap-3">
+                  <div className={cn(
+                    "w-4 h-4 rounded-full",
+                    results.decision === 'No change' ? "bg-emerald-500" :
+                    results.decision === 'Minor change' ? "bg-amber-500" : "bg-red-500"
+                  )} />
+                  <span className="text-lg font-bold uppercase tracking-tight">
+                    {results.decision}
+                  </span>
+                </div>
+              </div>
+              <div className="bg-black/5 p-4 rounded-2xl">
+                <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-2">Confidence Level</h3>
+                <span className="text-lg font-bold uppercase tracking-tight">{results.confidence}</span>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Proposed Range Shift</h2>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center p-3 border border-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Lower Limit</p>
+                  <p className="text-xl font-bold">{results.shifts.lower > 0 ? '+' : ''}{results.shifts.lower.toFixed(1)}s</p>
+                </div>
+                <div className="text-center p-3 border border-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Upper Limit</p>
+                  <p className="text-xl font-bold">{results.shifts.upper > 0 ? '+' : ''}{results.shifts.upper.toFixed(1)}s</p>
+                </div>
+                <div className="text-center p-3 border border-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Width Shift</p>
+                  <p className="text-xl font-bold">
+                    {results.shifts.width > 0 ? '+' : ''}{results.shifts.width.toFixed(1)}s
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="col-span-1 space-y-6">
+            <div className="bg-black p-6 rounded-[32px] text-white">
+              <h3 className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4">Proposed Range</h3>
+              <div className="text-4xl font-bold tracking-tighter mb-2">
+                {results.proposedRange.lower} – {results.proposedRange.upper}s
+              </div>
+              <p className="text-[10px] font-medium text-white/60">Optimized for {config.therapeuticXaRange.lower}-{config.therapeuticXaRange.upper} IU/mL anti-Xa</p>
+            </div>
+
+            <div className="space-y-4">
+              <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Impact Summary</h3>
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-black/60">Misclassification</span>
+                  <span className="font-bold">{(results.misclassification.proposed.rate).toFixed(1)}%</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-black/60">Risk Score</span>
+                  <span className="font-bold">{results.misclassification.proposed.weightedScore.toFixed(1)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-black/60">Improvement</span>
+                  <span className="font-bold">{results.misclassification.improvement.toFixed(1)}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Medical Director Commentary</h2>
+          <p className="text-sm leading-relaxed whitespace-pre-wrap">{commentary.medicalDirectorNotes}</p>
+        </div>
+
+        <div className="space-y-4">
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Assumptions & Limitations</h2>
+          <p className="text-sm leading-relaxed whitespace-pre-wrap">{commentary.limitationsNotes}</p>
+        </div>
+      </section>
+
+      <div className="page-break" />
+
+      {/* Technical Report */}
+      <section className="space-y-8 pt-8">
+        <div className="flex justify-between items-start border-b-2 border-black pb-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tighter">Technical Validation Supplement</h1>
+            <p className="text-sm font-bold uppercase tracking-widest text-black/60">Statistical Analysis & QC Summary</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-12">
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Methodology</h2>
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">{commentary.technicalNotes}</p>
+            </div>
+
+            <div className="space-y-4">
+              <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Regression Statistics</h3>
+              <table className="w-full text-sm">
+                <tbody className="divide-y divide-black/5">
+                  <tr>
+                    <td className="py-2 text-black/60">Correlation (R²)</td>
+                    <td className="py-2 font-bold text-right">{results.regressionModel.r2.toFixed(4)}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 text-black/60">Slope</td>
+                    <td className="py-2 font-bold text-right">{results.regressionModel.slope.toFixed(4)}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 text-black/60">Intercept</td>
+                    <td className="py-2 font-bold text-right">{results.regressionModel.intercept.toFixed(4)}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 text-black/60">Method</td>
+                    <td className="py-2 font-bold text-right">{results.regressionMethod}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="space-y-4">
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Data Quality Summary</h2>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 bg-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Total Points</p>
+                  <p className="text-lg font-bold">{rawData.length}</p>
+                </div>
+                <div className="p-3 bg-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Usable Points</p>
+                  <p className="text-lg font-bold">{results.summary.qc.totalUsable}</p>
+                </div>
+                <div className="p-3 bg-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Excluded Points</p>
+                  <p className="text-lg font-bold text-red-600">{rawData.filter(d => d.excluded).length}</p>
+                </div>
+                <div className="p-3 bg-black/5 rounded-xl">
+                  <p className="text-[8px] font-bold uppercase text-black/40">Primary Comparison</p>
+                  <p className="text-xs font-bold truncate">{comparisons.find(c => c.isPrimary)?.label || 'None'}</p>
+                </div>
+              </div>
+            </div>
+
+            {config.includeMU && (
+              <div className="space-y-4">
+                <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Uncertainty of Measurement (Therapeutic Band)</h3>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="p-2 border border-black/5 rounded-lg text-center">
+                    <p className="text-[8px] font-bold text-black/40 uppercase">anti-Xa</p>
+                    <p className="text-xs font-bold">{config.muBands.xa[1]?.value}{config.muUnits.xa === 'CV%' ? '%' : ''}</p>
+                  </div>
+                  <div className="p-2 border border-black/5 rounded-lg text-center">
+                    <p className="text-[8px] font-bold text-black/40 uppercase">APTT Cur</p>
+                    <p className="text-xs font-bold">{config.muBands.apttCurrent[1]?.value}{config.muUnits.apttCurrent === 'CV%' ? '%' : ''}</p>
+                  </div>
+                  <div className="p-2 border border-black/5 rounded-lg text-center">
+                    <p className="text-[8px] font-bold text-black/40 uppercase">APTT New</p>
+                    <p className="text-xs font-bold">{config.muBands.apttNew[1]?.value}{config.muUnits.apttNew === 'CV%' ? '%' : ''}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {results.temporalSignal && results.temporalSignal.possible && (
+              <div className="space-y-4">
+                <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Trend Analysis (Temporal Signal)</h2>
+                <p className="text-sm leading-relaxed mb-4">{results.temporalSignal.interpretation}</p>
+                <div className="grid grid-cols-2 gap-4">
+                  {results.temporalSignal.metrics.map((m, i) => (
+                    <div key={i} className="p-3 border border-black/5 rounded-xl">
+                      <p className="text-[8px] font-bold uppercase text-black/40">{m.label}</p>
+                      <div className="flex justify-between items-end">
+                        <p className="text-lg font-bold">R² {m.r2.toFixed(3)}</p>
+                        <p className="text-[10px] text-black/60">n={m.n}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Exclusion Audit</h2>
+          <table className="w-full text-[10px]">
+            <thead>
+              <tr className="border-b border-black">
+                <th className="text-left py-2">ID</th>
+                <th className="text-left py-2">Reason</th>
+                <th className="text-right py-2">Xa</th>
+                <th className="text-right py-2">APTT New</th>
+                <th className="text-right py-2">APTT Cur</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-black/5">
+              {rawData.filter(d => d.excluded).slice(0, 10).map(d => (
+                <tr key={d.id}>
+                  <td className="py-1">{d.id}</td>
+                  <td className="py-1">{d.exclusionReason}</td>
+                  <td className="py-1 text-right">{d.xa}</td>
+                  <td className="py-1 text-right">{d.apttNew}</td>
+                  <td className="py-1 text-right">{d.apttCurrent}</td>
+                </tr>
+              ))}
+              {rawData.filter(d => d.excluded).length > 10 && (
+                <tr>
+                  <td colSpan={5} className="py-1 text-center italic text-black/40">
+                    ... and {rawData.filter(d => d.excluded).length - 10} more exclusions
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }

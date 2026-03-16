@@ -154,6 +154,92 @@ const fitWeightedDeming = (
   return { slope, intercept, r2, n, method: 'Weighted Deming' };
 };
 
+export const fitOLSRegression = (
+  data: any[],
+  xKey: string,
+  yKey: string
+): RegressionModel => {
+  const n = data.length;
+  const x = data.map(d => d[xKey] as number);
+  const y = data.map(d => d[yKey] as number);
+
+  const meanX = x.reduce((a, b) => a + b, 0) / n;
+  const meanY = y.reduce((a, b) => a + b, 0) / n;
+
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (x[i] - meanX) * (y[i] - meanY);
+    den += (x[i] - meanX) * (x[i] - meanX);
+  }
+
+  const slope = den === 0 ? 0 : num / den;
+  const intercept = meanY - slope * meanX;
+
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < n; i++) {
+    const pred = intercept + slope * x[i];
+    ssRes += Math.pow(y[i] - pred, 2);
+    ssTot += Math.pow(y[i] - meanY, 2);
+  }
+  const r2 = ssTot === 0 ? 0 : 1 - (ssRes / ssTot);
+
+  return { slope, intercept, r2, n, method: 'OLS' as any };
+};
+
+export const fitPassingBablokRegression = (
+  data: any[],
+  xKey: string,
+  yKey: string
+): RegressionModel => {
+  const n = data.length;
+  const x = data.map(d => d[xKey] as number);
+  const y = data.map(d => d[yKey] as number);
+
+  const slopes: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const dx = x[j] - x[i];
+      const dy = y[j] - y[i];
+      if (dx !== 0) {
+        const s = dy / dx;
+        if (s !== -1) {
+          slopes.push(s);
+        }
+      }
+    }
+  }
+
+  if (slopes.length === 0) {
+    return { slope: 1, intercept: 0, r2: 0, n, method: 'Passing-Bablok' as any };
+  }
+
+  slopes.sort((a, b) => a - b);
+  const slope = slopes.length % 2 === 0
+    ? (slopes[slopes.length / 2 - 1] + slopes[slopes.length / 2]) / 2
+    : slopes[Math.floor(slopes.length / 2)];
+
+  const intercepts = data.map(d => (d[yKey] as number) - slope * (d[xKey] as number));
+  intercepts.sort((a, b) => a - b);
+  const intercept = intercepts.length % 2 === 0
+    ? (intercepts[intercepts.length / 2 - 1] + intercepts[intercepts.length / 2]) / 2
+    : intercepts[Math.floor(intercepts.length / 2)];
+
+  // R2 (approximate for PB)
+  const meanY = y.reduce((a, b) => a + b, 0) / n;
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < n; i++) {
+    const pred = intercept + slope * x[i];
+    ssRes += Math.pow(y[i] - pred, 2);
+    ssTot += Math.pow(y[i] - meanY, 2);
+  }
+  const r2 = ssTot === 0 ? 0 : 1 - (ssRes / ssTot);
+
+  return { slope, intercept, r2, n, method: 'Passing-Bablok' as any };
+};
+
 export const predictRange = (
   model: RegressionModel,
   targetRange: Range

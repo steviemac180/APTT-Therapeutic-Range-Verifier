@@ -1,7 +1,7 @@
 import { ProcessedDataRow, AnalysisConfig, AnalysisResults, Range, Comparison } from '../types';
 import { prepareAnalysisData, generateSummaryResults } from './analysis/dataPrep';
 import { calculateMUAdjustments, calculateSampleWeights } from './analysis/muHandler';
-import { fitDemingRegression, predictRange } from './analysis/regression';
+import { fitDemingRegression, predictRange, fitOLSRegression, fitPassingBablokRegression } from './analysis/regression';
 import { calculateMisclassificationRates } from './analysis/misclassification';
 import { generateRecommendations } from './analysis/recommendation';
 import { analyzeTemporalSignals } from './analysis/temporal';
@@ -95,7 +95,75 @@ export const runAnalysis = async (
     config
   );
 
-  // 6. Confidence & Recommendations
+  // 6. Sensitivity Analysis
+  let sensitivityAnalysis: AnalysisResults['sensitivityAnalysis'] = undefined;
+  if (config.enableSensitivityAnalysis) {
+    const sensitivityResults: any[] = [];
+    
+    // OLS
+    const olsModel = fitOLSRegression(activeData, 'xa', 'apttNew');
+    const olsRangeRaw = predictRange(olsModel, config.therapeuticXaRange);
+    sensitivityResults.push({
+      method: 'OLS',
+      proposedRange: { lower: Math.round(olsRangeRaw.lower), upper: Math.round(olsRangeRaw.upper) },
+      width: Math.round(olsRangeRaw.upper - olsRangeRaw.lower),
+      slope: olsModel.slope,
+      intercept: olsModel.intercept
+    });
+
+    // Passing-Bablok
+    const pbModel = fitPassingBablokRegression(activeData, 'xa', 'apttNew');
+    const pbRangeRaw = predictRange(pbModel, config.therapeuticXaRange);
+    sensitivityResults.push({
+      method: 'Passing-Bablok',
+      proposedRange: { lower: Math.round(pbRangeRaw.lower), upper: Math.round(pbRangeRaw.upper) },
+      width: Math.round(pbRangeRaw.upper - pbRangeRaw.lower),
+      slope: pbModel.slope,
+      intercept: pbModel.intercept
+    });
+
+    // Standard Deming (if primary is Weighted)
+    if (newModel.method === 'Weighted Deming') {
+      const stdDemingModel = fitDemingRegression(activeData, 'xa', 'apttNew', undefined, 1.0);
+      const stdDemingRangeRaw = predictRange(stdDemingModel, config.therapeuticXaRange);
+      sensitivityResults.push({
+        method: 'Standard Deming',
+        proposedRange: { lower: Math.round(stdDemingRangeRaw.lower), upper: Math.round(stdDemingRangeRaw.upper) },
+        width: Math.round(stdDemingRangeRaw.upper - stdDemingRangeRaw.lower),
+        slope: stdDemingModel.slope,
+        intercept: stdDemingModel.intercept
+      });
+    }
+
+    // Compare and assign agreement
+    let overallAgreement = true;
+    let disagreementReason = '';
+    
+    const finalResults = sensitivityResults.map(res => {
+      const lowerDiff = Math.abs(res.proposedRange.lower - proposedRange.lower);
+      const upperDiff = Math.abs(res.proposedRange.upper - proposedRange.upper);
+      
+      let agreement: 'Agree' | 'Minor Disagreement' | 'Major Disagreement' = 'Agree';
+      if (lowerDiff > 5 || upperDiff > 5) {
+        agreement = 'Major Disagreement';
+        overallAgreement = false;
+        disagreementReason = `Material difference detected with ${res.method}`;
+      } else if (lowerDiff > 2 || upperDiff > 2) {
+        agreement = 'Minor Disagreement';
+      }
+      
+      return { ...res, agreement };
+    });
+
+    sensitivityAnalysis = {
+      enabled: true,
+      results: finalResults,
+      overallAgreement,
+      disagreementReason
+    };
+  }
+
+  // 7. Confidence & Recommendations
   const dataQuality = {
     flags: summary.qc.flaggedUsableCount > 0 ? ['Data quality concerns were flagged during pre-analysis validation'] : [],
     usableCount: activeData.length,
@@ -108,10 +176,11 @@ export const runAnalysis = async (
     misclassification,
     { lowerShiftInterval, upperShiftInterval, widthShiftInterval },
     dataQuality,
-    { method: newModel.method, reason: newModel.reason }
+    { method: newModel.method, reason: newModel.reason },
+    sensitivityAnalysis
   );
 
-  // 7. Temporal Analysis
+  // 8. Temporal Analysis
   const temporalSignal = analyzeTemporalSignals(data, comparisons, config);
 
   return {
@@ -141,6 +210,7 @@ export const runAnalysis = async (
       widthShiftInterval,
       iterations
     },
-    temporalSignal
+    temporalSignal,
+    sensitivityAnalysis
   };
 };

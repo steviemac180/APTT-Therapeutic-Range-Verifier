@@ -285,11 +285,72 @@ export const exportProcessedDataToCSV = (data: ProcessedDataRow[], comparisons: 
   });
 
   const csv = Papa.unparse(exportData);
+  downloadCSV(csv, `processed_dataset_${new Date().toISOString().split('T')[0]}.csv`);
+};
+
+export const exportDecisionTableToCSV = (results: any) => {
+  if (!results) return;
+  
+  // If we have sensitivity analysis, that's our decision table
+  if (results.sensitivityAnalysis && results.sensitivityAnalysis.results) {
+    const exportData = results.sensitivityAnalysis.results.map((row: any) => ({
+      'Method': row.method,
+      'Proposed Lower': row.proposedRange.lower,
+      'Proposed Upper': row.proposedRange.upper,
+      'Proposed Width': row.width,
+      'Slope': row.slope.toFixed(4),
+      'Intercept': row.intercept.toFixed(4),
+      'Agreement': row.agreement
+    }));
+
+    const csv = Papa.unparse(exportData);
+    downloadCSV(csv, `decision_comparison_${new Date().toISOString().split('T')[0]}.csv`);
+    return;
+  }
+  
+  // Fallback: just export the primary decision
+  const exportData = [{
+    'Method': results.regressionMethod,
+    'Proposed Lower': results.proposedRange.lower,
+    'Proposed Upper': results.proposedRange.upper,
+    'Proposed Width': results.shifts.width + (results.newLotPredicted.width), // This is a bit arbitrary but gives something
+    'Decision': results.decision,
+    'Confidence': results.confidence
+  }];
+
+  const csv = Papa.unparse(exportData);
+  downloadCSV(csv, `decision_summary_${new Date().toISOString().split('T')[0]}.csv`);
+};
+
+export const exportKeyOutputsToCSV = (results: any, config: any) => {
+  if (!results) return;
+
+  const exportData = [
+    { 'Parameter': 'Current Range Lower', 'Value': config.currentApprovedRange.lower },
+    { 'Parameter': 'Current Range Upper', 'Value': config.currentApprovedRange.upper },
+    { 'Parameter': 'Proposed Range Lower', 'Value': results.proposedRange.lower },
+    { 'Parameter': 'Proposed Range Upper', 'Value': results.proposedRange.upper },
+    { 'Parameter': 'Lower Shift', 'Value': results.shifts.lower.toFixed(1) },
+    { 'Parameter': 'Upper Shift', 'Value': results.shifts.upper.toFixed(1) },
+    { 'Parameter': 'Total Misclassified %', 'Value': results.misclassification.proposed.rate.toFixed(1) },
+    { 'Parameter': 'Proposed Risk Score', 'Value': results.misclassification.proposed.weightedScore.toFixed(1) },
+    { 'Parameter': 'Confidence Level', 'Value': results.confidence },
+    { 'Parameter': 'Correlation (R²)', 'Value': results.regressionModel.r2.toFixed(4) },
+    { 'Parameter': 'Regression Slope', 'Value': results.regressionModel.slope.toFixed(4) },
+    { 'Parameter': 'Regression Intercept', 'Value': results.regressionModel.intercept.toFixed(4) },
+    { 'Parameter': 'Regression Method', 'Value': results.regressionMethod }
+  ];
+
+  const csv = Papa.unparse(exportData);
+  downloadCSV(csv, `key_outputs_${new Date().toISOString().split('T')[0]}.csv`);
+};
+
+const downloadCSV = (csv: string, filename: string) => {
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   const url = URL.createObjectURL(blob);
   link.setAttribute('href', url);
-  link.setAttribute('download', `processed_dataset_${new Date().toISOString().split('T')[0]}.csv`);
+  link.setAttribute('download', filename);
   link.style.visibility = 'hidden';
   document.body.appendChild(link);
   link.click();

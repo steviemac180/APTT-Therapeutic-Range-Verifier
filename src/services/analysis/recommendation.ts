@@ -17,7 +17,8 @@ export const generateRecommendations = (
   regressionInfo: {
     method: 'Weighted Deming' | 'Standard Deming';
     reason?: string;
-  }
+  },
+  sensitivityAnalysis?: AnalysisResults['sensitivityAnalysis']
 ) => {
   let decision: DecisionCategory = 'No change';
   let confidence: ConfidenceLevel = 'High confidence';
@@ -32,6 +33,11 @@ export const generateRecommendations = (
     confidence = 'Low confidence';
   } else if (dataQuality.usableCount < 45 || dataQuality.flags.length > 0) {
     confidence = 'Moderate confidence';
+  }
+
+  // Sensitivity Analysis impact on confidence
+  if (sensitivityAnalysis?.enabled && !sensitivityAnalysis.overallAgreement) {
+    confidence = 'Low confidence';
   }
 
   // 2. Decision Logic
@@ -58,6 +64,9 @@ export const generateRecommendations = (
   if (confidence === 'Low confidence') warnings.push('Statistical confidence is low due to limited data or high variability.');
   if (dataQuality.flags.length > 0) warnings.push('Data quality concerns were flagged during pre-analysis validation.');
   if (regressionInfo.method === 'Standard Deming') warnings.push('Weighted Deming failed to converge; standard Deming regression was used as a fallback.');
+  if (sensitivityAnalysis?.enabled && !sensitivityAnalysis.overallAgreement) {
+    warnings.push(`Method Robustness: ${sensitivityAnalysis.disagreementReason}. Sensitivity methods show material disagreement with the primary model.`);
+  }
 
   // 5. Generate Interpretation
   let interpretation = '';

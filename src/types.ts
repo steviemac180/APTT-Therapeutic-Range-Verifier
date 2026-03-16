@@ -34,6 +34,13 @@ export interface ProcessedDataRow {
   rawValues: Record<string, string>;
 }
 
+export interface ReportCommentary {
+  executiveSummary: string;
+  medicalDirectorNotes: string;
+  technicalNotes: string;
+  limitationsNotes: string;
+}
+
 export interface FileValidationSummary {
   totalRows: number;
   usableRows: number;
@@ -88,6 +95,7 @@ export interface AnalysisConfig {
   };
   analysisDepth: 'Standard' | 'Advanced';
   includeMU: boolean;
+  enableSensitivityAnalysis: boolean;
   riskWeights: {
     subToTherapeutic: number;
     supraToTherapeutic: number;
@@ -190,6 +198,19 @@ export interface AnalysisResults {
       label: string;
     }[];
     interpretation: string;
+  };
+  sensitivityAnalysis?: {
+    enabled: boolean;
+    results: {
+      method: string;
+      proposedRange: Range;
+      width: number;
+      agreement: 'Agree' | 'Minor Disagreement' | 'Major Disagreement';
+      slope: number;
+      intercept: number;
+    }[];
+    overallAgreement: boolean;
+    disagreementReason?: string;
   };
 }
 
