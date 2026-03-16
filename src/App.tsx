@@ -46,7 +46,8 @@ import {
   LineChart,
   ComposedChart,
   ReferenceArea,
-  ReferenceLine
+  ReferenceLine,
+  ErrorBar
 } from 'recharts';
 import { 
   ProcessedDataRow, 
@@ -59,7 +60,8 @@ import {
   SetupStep,
   ConfusionMatrix,
   SummaryResults,
-  ReportCommentary
+  ReportCommentary,
+  SupportDiagnostics
 } from './types';
 import { 
   DEFAULT_XA_RANGE, 
@@ -141,6 +143,11 @@ function generateAssumptionsAndLimitations(results: AnalysisResults, config: Ana
 
   if (results.temporalSignal?.linkageMethod === 'year-based fallback assumption') {
     limitations.push("Trend analysis used year-based fallback linkage due to missing lot IDs in the provided dataset.");
+  }
+
+  const primarySupport = results.supportDiagnostics.find(d => d.isPrimary);
+  if (primarySupport && primarySupport.coverageStatus === 'Weak support') {
+    limitations.push(`Data Sufficiency: ${primarySupport.interpretation}`);
   }
 
   limitations.push("Descriptive overview is provided for historical context and visual distribution check only.");
@@ -594,6 +601,552 @@ function DescriptiveDataOverview({ data, comparisons, config }: { data: Processe
   );
 }
 
+// Spearman Correlation
+function spearmanCorrelation(x: number[], y: number[]) {
+  const n = x.length;
+  if (n < 2) return 0;
+
+  const getRanks = (arr: number[]) => {
+    const sorted = arr.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+    const ranks = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let j = i;
+      while (j < n - 1 && sorted[j + 1].v === sorted[i].v) j++;
+      const rank = (i + j) / 2 + 1;
+      for (let k = i; k <= j; k++) ranks[sorted[k].i] = rank;
+      i = j;
+    }
+    return ranks;
+  };
+
+  const rankX = getRanks(x);
+  const rankY = getRanks(y);
+
+  const meanX = rankX.reduce((a, b) => a + b, 0) / n;
+  const meanY = rankY.reduce((a, b) => a + b, 0) / n;
+
+  let num = 0;
+  let denX = 0;
+  let denY = 0;
+
+  for (let i = 0; i < n; i++) {
+    const dx = rankX[i] - meanX;
+    const dy = rankY[i] - meanY;
+    num += dx * dy;
+    denX += dx * dx;
+    denY += dy * dy;
+  }
+
+  if (denX === 0 || denY === 0) return 0;
+  return num / Math.sqrt(denX * denY);
+}
+
+// Standard Deviation
+function calculateSD(values: number[]) {
+  const n = values.length;
+  if (n < 2) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / n;
+  const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (n - 1);
+  return Math.sqrt(variance);
+}
+
+// Simple Moving Average for trend
+function calculateTrend(data: { x: number, y: number }[], windowSize = 0.25) {
+  if (data.length < 5) return [];
+  const sorted = [...data].sort((a, b) => a.x - b.x);
+  const xMin = sorted[0].x;
+  const xMax = sorted[sorted.length - 1].x;
+  const range = xMax - xMin;
+  const step = range / 40;
+  
+  const trend = [];
+  for (let x = xMin; x <= xMax; x += step) {
+    const window = sorted.filter(d => Math.abs(d.x - x) < range * windowSize);
+    if (window.length >= 3) {
+      const avgY = window.reduce((a, b) => a + b.y, 0) / window.length;
+      trend.push({ xa: x, delta: avgY });
+    }
+  }
+  return trend;
+}
+
+function PairedDifferenceVsXaPlot({ data, comparisons, config }: { data: ProcessedDataRow[], comparisons: Comparison[], config: AnalysisConfig }) {
+  const includedComparisons = comparisons.filter(c => c.included);
+  const [selectedCompId, setSelectedCompId] = useState<string>(includedComparisons.find(c => c.isPrimary)?.id || includedComparisons[0]?.id || '');
+
+  const activeComp = includedComparisons.find(c => c.id === selectedCompId);
+  const compData = data.filter(d => d.comparisonId === selectedCompId && d.isUsable && d.xa !== null && d.apttCurrent !== null && d.apttNew !== null);
+
+  const plotData = useMemo(() => {
+    return compData.map(d => ({
+      xa: d.xa as number,
+      delta: (d.apttCurrent as number) - (d.apttNew as number),
+      id: d.id
+    })).sort((a, b) => a.xa - b.xa);
+  }, [compData]);
+
+  const stats = useMemo(() => {
+    if (plotData.length < 5) return null;
+    const xas = plotData.map(d => d.xa);
+    const deltas = plotData.map(d => d.delta);
+    
+    const spearman = spearmanCorrelation(xas, deltas);
+    const mean = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+    const median = [...deltas].sort((a, b) => a - b)[Math.floor(deltas.length / 2)];
+    
+    const trendPoints = calculateTrend(plotData.map(d => ({ x: d.xa, y: d.delta })));
+    let trendDesc = 'Mixed';
+    if (trendPoints.length > 5) {
+      const first = trendPoints[0].delta;
+      const last = trendPoints[trendPoints.length - 1].delta;
+      const diff = last - first;
+      
+      const absDiff = Math.abs(diff);
+      if (absDiff < 1.5) trendDesc = 'Broadly Flat';
+      else if (diff > 0) trendDesc = 'Increasing';
+      else trendDesc = 'Decreasing';
+    }
+
+    return { spearman, mean, median, trendDesc, trendPoints };
+  }, [plotData]);
+
+  if (!activeComp || plotData.length === 0) return null;
+
+  return (
+    <div className="space-y-6 pt-8 border-t border-black/5">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Paired Difference vs. anti-Xa</h5>
+            <InfoTooltip content="Visualizes if the difference between lots is constant or changes across the therapeutic range." />
+          </div>
+          <p className="text-[9px] text-black/30 font-medium italic leading-tight">
+            Paired difference = Current lot APTT minus New lot APTT for the same sample.<br />
+            This plot shows whether the lot difference changes across anti-Xa level.
+          </p>
+        </div>
+
+        {includedComparisons.length > 1 && (
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-black/30">Comparison:</span>
+            <select 
+              value={selectedCompId}
+              onChange={(e) => setSelectedCompId(e.target.value)}
+              className="text-[10px] font-bold bg-black/[0.03] border-none rounded-lg px-3 py-1.5 focus:ring-0"
+            >
+              {includedComparisons.map(c => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+        <div className="lg:col-span-3 h-[300px] w-full bg-black/[0.01] rounded-2xl border border-black/5 p-4">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={plotData} margin={{ top: 10, right: 10, bottom: 20, left: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#00000008" vertical={false} />
+              <XAxis 
+                type="number" 
+                dataKey="xa" 
+                name="Anti-Xa" 
+                unit=" IU/mL" 
+                domain={['auto', 'auto']}
+                tick={{ fontSize: 9, fontWeight: 600 }}
+                label={{ value: 'Anti-Xa (IU/mL)', position: 'bottom', offset: 0, fontSize: 9, fontWeight: 700 }}
+              />
+              <YAxis 
+                type="number" 
+                dataKey="delta" 
+                name="Delta APTT" 
+                unit="s" 
+                domain={['auto', 'auto']}
+                tick={{ fontSize: 9, fontWeight: 600 }}
+                label={{ value: 'Δ APTT (s)', angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 700 }}
+              />
+              <Tooltip 
+                cursor={{ strokeDasharray: '3 3' }}
+                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', fontSize: '11px' }}
+              />
+              
+              <ReferenceLine y={0} stroke="#000" strokeWidth={1} strokeOpacity={0.2} />
+              <ReferenceLine x={config.therapeuticXaRange.lower} stroke="#10b981" strokeDasharray="3 3" strokeOpacity={0.5} label={{ value: 'Lower', position: 'top', fontSize: 8, fill: '#10b981' }} />
+              <ReferenceLine x={config.therapeuticXaRange.upper} stroke="#10b981" strokeDasharray="3 3" strokeOpacity={0.5} label={{ value: 'Upper', position: 'top', fontSize: 8, fill: '#10b981' }} />
+
+              <Scatter name="Samples" data={plotData} fill="#141414" fillOpacity={0.3} shape="circle" />
+              
+              {stats?.trendPoints && (
+                <Line 
+                  type="monotone" 
+                  data={stats.trendPoints} 
+                  dataKey="delta" 
+                  stroke="#f59e0b" 
+                  strokeWidth={2} 
+                  dot={false} 
+                  activeDot={false}
+                  name="Trend"
+                />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="space-y-4">
+          <div className="bg-black/[0.02] p-4 rounded-2xl border border-black/5 space-y-4">
+            <h6 className="text-[9px] font-bold uppercase tracking-widest text-black/40">Trend Summary</h6>
+            
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-black/60">Spearman ρ</span>
+                <span className={cn(
+                  "text-xs font-mono font-bold",
+                  Math.abs(stats?.spearman || 0) > 0.5 ? "text-amber-600" : "text-black"
+                )}>
+                  {stats?.spearman.toFixed(3) || '-'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-black/60">Mean Diff</span>
+                <span className="text-xs font-mono font-bold">{stats?.mean.toFixed(2)}s</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-black/60">Median Diff</span>
+                <span className="text-xs font-mono font-bold">{stats?.median.toFixed(1)}s</span>
+              </div>
+              <div className="pt-2 border-t border-black/5">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-black/60">Trend Pattern</span>
+                  <span className={cn(
+                    "px-2 py-0.5 rounded text-[9px] font-bold uppercase",
+                    stats?.trendDesc === 'Broadly Flat' ? "bg-emerald-50 text-emerald-600" :
+                    stats?.trendDesc === 'Mixed' ? "bg-slate-50 text-slate-600" : "bg-amber-50 text-amber-600"
+                  )}>
+                    {stats?.trendDesc || '-'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[9px] text-black/40 leading-relaxed italic">
+            A non-flat trend or high correlation indicates that the lot-to-lot bias is not constant across the range, which may require more complex range adjustments.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BlandAltmanPlot({ data, comparisons, config }: { data: ProcessedDataRow[], comparisons: Comparison[], config: AnalysisConfig }) {
+  const includedComparisons = comparisons.filter(c => c.included);
+  const [selectedCompId, setSelectedCompId] = useState<string>(includedComparisons.find(c => c.isPrimary)?.id || includedComparisons[0]?.id || '');
+
+  const activeComp = includedComparisons.find(c => c.id === selectedCompId);
+  const compData = data.filter(d => d.comparisonId === selectedCompId && d.isUsable && d.apttCurrent !== null && d.apttNew !== null);
+
+  const plotData = useMemo(() => {
+    return compData.map(d => ({
+      mean: ((d.apttCurrent as number) + (d.apttNew as number)) / 2,
+      delta: (d.apttCurrent as number) - (d.apttNew as number),
+      id: d.id
+    })).sort((a, b) => a.mean - b.mean);
+  }, [compData]);
+
+  const stats = useMemo(() => {
+    if (plotData.length < 5) return null;
+    const deltas = plotData.map(d => d.delta);
+    
+    const meanDiff = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+    const sdDiff = calculateSD(deltas);
+    const loaUpper = meanDiff + 1.96 * sdDiff;
+    const loaLower = meanDiff - 1.96 * sdDiff;
+    
+    const trendPoints = calculateTrend(plotData.map(d => ({ x: d.mean, y: d.delta })));
+    let interpretation = 'approximately constant shift';
+    
+    if (trendPoints.length > 5) {
+      const first = trendPoints[0].delta;
+      const last = trendPoints[trendPoints.length - 1].delta;
+      const diff = Math.abs(last - first);
+      
+      if (diff > 3.0) {
+        interpretation = 'possible level-dependent shift';
+      }
+    }
+    
+    if (sdDiff > 10.0) {
+      interpretation = 'high scatter / unstable';
+    }
+
+    return { meanDiff, sdDiff, loaUpper, loaLower, trendPoints, interpretation };
+  }, [plotData]);
+
+  if (!activeComp || plotData.length === 0) return null;
+
+  return (
+    <div className="space-y-6 pt-8 border-t border-black/5">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Bland–Altman Lot Comparison</h5>
+            <InfoTooltip content="Visualizes the agreement between reagent lots. Shows if the bias is constant or depends on the APTT level." />
+          </div>
+          <p className="text-[9px] text-black/30 font-medium italic leading-tight">
+            This plot shows whether the lot difference changes across the APTT range.<br />
+            A flat pattern suggests an approximately constant shift; a rising or falling pattern suggests level-dependent behaviour.
+          </p>
+        </div>
+
+        {includedComparisons.length > 1 && (
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-black/30">Comparison:</span>
+            <select 
+              value={selectedCompId}
+              onChange={(e) => setSelectedCompId(e.target.value)}
+              className="text-[10px] font-bold bg-black/[0.03] border-none rounded-lg px-3 py-1.5 focus:ring-0"
+            >
+              {includedComparisons.map(c => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+        <div className="lg:col-span-3 h-[300px] w-full bg-black/[0.01] rounded-2xl border border-black/5 p-4">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={plotData} margin={{ top: 10, right: 10, bottom: 20, left: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#00000008" vertical={false} />
+              <XAxis 
+                type="number" 
+                dataKey="mean" 
+                name="Mean APTT" 
+                unit="s" 
+                domain={['auto', 'auto']}
+                tick={{ fontSize: 9, fontWeight: 600 }}
+                label={{ value: 'Mean APTT (s)', position: 'bottom', offset: 0, fontSize: 9, fontWeight: 700 }}
+              />
+              <YAxis 
+                type="number" 
+                dataKey="delta" 
+                name="Delta APTT" 
+                unit="s" 
+                domain={['auto', 'auto']}
+                tick={{ fontSize: 9, fontWeight: 600 }}
+                label={{ value: 'Δ APTT (s)', angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 700 }}
+              />
+              <Tooltip 
+                cursor={{ strokeDasharray: '3 3' }}
+                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', fontSize: '11px' }}
+              />
+              
+              <ReferenceLine y={0} stroke="#000" strokeWidth={1} strokeOpacity={0.2} />
+              {stats && (
+                <>
+                  <ReferenceLine y={stats.meanDiff} stroke="#141414" strokeDasharray="3 3" strokeOpacity={0.4} label={{ value: 'Mean', position: 'right', fontSize: 8 }} />
+                  <ReferenceLine y={stats.loaUpper} stroke="#ef4444" strokeDasharray="5 5" strokeOpacity={0.3} label={{ value: '+1.96 SD', position: 'right', fontSize: 8 }} />
+                  <ReferenceLine y={stats.loaLower} stroke="#ef4444" strokeDasharray="5 5" strokeOpacity={0.3} label={{ value: '-1.96 SD', position: 'right', fontSize: 8 }} />
+                </>
+              )}
+
+              <Scatter name="Samples" data={plotData} fill="#141414" fillOpacity={0.3} shape="circle" />
+              
+              {stats?.trendPoints && (
+                <Line 
+                  type="monotone" 
+                  data={stats.trendPoints} 
+                  dataKey="delta" 
+                  stroke="#3b82f6" 
+                  strokeWidth={2} 
+                  dot={false} 
+                  activeDot={false}
+                  name="Trend"
+                />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="space-y-4">
+          <div className="bg-black/[0.02] p-4 rounded-2xl border border-black/5 space-y-4">
+            <h6 className="text-[9px] font-bold uppercase tracking-widest text-black/40">Agreement Summary</h6>
+            
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-black/60">Mean Diff</span>
+                <span className="text-xs font-mono font-bold">{stats?.meanDiff.toFixed(2)}s</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-black/60">SD of Diff</span>
+                <span className="text-xs font-mono font-bold">{stats?.sdDiff.toFixed(2)}s</span>
+              </div>
+              <div className="pt-2 border-t border-black/5 space-y-2">
+                <p className="text-[9px] font-bold uppercase tracking-widest text-black/30">95% Limits of Agreement</p>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-black/60">Lower</span>
+                  <span className="text-xs font-mono font-bold text-red-600/60">{stats?.loaLower.toFixed(1)}s</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-black/60">Upper</span>
+                  <span className="text-xs font-mono font-bold text-red-600/60">{stats?.loaUpper.toFixed(1)}s</span>
+                </div>
+              </div>
+              <div className="pt-2 border-t border-black/5">
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-black/60">Interpretation</span>
+                  <span className={cn(
+                    "px-2 py-1 rounded text-[9px] font-bold uppercase text-center",
+                    stats?.interpretation === 'approximately constant shift' ? "bg-emerald-50 text-emerald-600" :
+                    stats?.interpretation === 'high scatter / unstable' ? "bg-red-50 text-red-600" : "bg-amber-50 text-amber-600"
+                  )}>
+                    {stats?.interpretation || '-'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[9px] text-black/40 leading-relaxed italic">
+            Bland–Altman analysis identifies systematic bias and random error between lots. Wide limits or a non-zero slope indicate potential reagent instability or level-dependent sensitivity.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SupportDiagnosticsPanel({ results }: { results: AnalysisResults }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const primary = results.supportDiagnostics.find(d => d.isPrimary);
+  const others = results.supportDiagnostics.filter(d => !d.isPrimary);
+
+  if (!primary) return null;
+
+  const StatusIcon = ({ status }: { status: string }) => {
+    if (status === 'Good support') return <CheckCircle2 size={16} className="text-emerald-500" />;
+    if (status === 'Moderate support') return <AlertTriangle size={16} className="text-amber-500" />;
+    return <AlertCircle size={16} className="text-red-500" />;
+  };
+
+  const SupportBadge = ({ level }: { level: string }) => {
+    const colors = {
+      'Adequate': 'bg-emerald-50 text-emerald-600 border-emerald-100',
+      'Limited': 'bg-amber-50 text-amber-600 border-amber-100',
+      'Poor': 'bg-red-50 text-red-600 border-red-100'
+    };
+    return (
+      <span className={cn("px-2 py-0.5 rounded-md text-[9px] font-bold uppercase border", colors[level as keyof typeof colors])}>
+        {level}
+      </span>
+    );
+  };
+
+  const DiagnosticCard = ({ diag, isPrimary }: { diag: SupportDiagnostics, isPrimary: boolean }) => (
+    <div className={cn(
+      "p-6 rounded-2xl border transition-all",
+      isPrimary ? "bg-white border-black/5 shadow-sm" : "bg-black/[0.01] border-black/5"
+    )}>
+      <div className="flex justify-between items-start mb-6">
+        <div>
+          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-1">
+            {isPrimary ? "Primary Comparison" : "Comparison"}
+          </h5>
+          <p className="text-sm font-bold">{diag.comparisonLabel}</p>
+        </div>
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-black/[0.03] rounded-xl border border-black/5">
+          <StatusIcon status={diag.coverageStatus} />
+          <span className={cn(
+            "text-[10px] font-bold uppercase tracking-widest",
+            diag.coverageStatus === 'Good support' ? "text-emerald-600" :
+            diag.coverageStatus === 'Moderate support' ? "text-amber-600" : "text-red-600"
+          )}>
+            {diag.coverageStatus}
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-6">
+        <div className="space-y-1">
+          <p className="text-[9px] font-bold uppercase tracking-widest text-black/30">Total Usable</p>
+          <p className="text-xs font-mono font-bold">{diag.totalUsable}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[9px] font-bold uppercase tracking-widest text-black/30">Therapeutic n (%)</p>
+          <p className="text-xs font-mono font-bold">{diag.therapeuticCount} ({diag.therapeuticPercentage.toFixed(1)}%)</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[9px] font-bold uppercase tracking-widest text-black/30">Anti-Xa Range</p>
+          <p className="text-xs font-mono font-bold">{diag.xaMin.toFixed(2)} – {diag.xaMax.toFixed(2)}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[9px] font-bold uppercase tracking-widest text-black/30">Censored (%)</p>
+          <p className="text-xs font-mono font-bold text-amber-600">{diag.censoredCount} ({diag.censoredPercentage.toFixed(1)}%)</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-black/5">
+        <div className="flex justify-between items-center">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-black/40">Lower Limit Support</span>
+          <SupportBadge level={diag.lowerLimitSupport} />
+        </div>
+        <div className="flex justify-between items-center">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-black/40">Upper Limit Support</span>
+          <SupportBadge level={diag.upperLimitSupport} />
+        </div>
+      </div>
+
+      <div className="mt-6 p-4 bg-black/[0.02] rounded-xl border border-dashed border-black/10">
+        <p className="text-[10px] text-black/60 leading-relaxed italic">
+          {diag.interpretation}
+        </p>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Data Sufficiency & Support Diagnostics</h4>
+          <InfoTooltip content="Heuristic evaluation of how well the uploaded data covers the critical therapeutic decision points." />
+        </div>
+        {others.length > 0 && (
+          <button 
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 hover:text-emerald-700 transition-colors"
+          >
+            {isExpanded ? "Show Primary Only" : `Show All (${results.supportDiagnostics.length})`}
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        <DiagnosticCard diag={primary} isPrimary={true} />
+        
+        <AnimatePresence>
+          {isExpanded && others.map(diag => (
+            <motion.div
+              key={diag.comparisonId}
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="overflow-hidden"
+            >
+              <DiagnosticCard diag={diag} isPrimary={false} />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      <p className="text-[10px] text-black/30 font-medium italic px-2">
+        "These diagnostics indicate how well the uploaded data support the clinically relevant decision points."
+      </p>
+    </div>
+  );
+}
+
 function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
   const signal = results.temporalSignal;
   
@@ -774,6 +1327,115 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
   );
 }
 
+function HistoricalShiftSummary({ data, comparisons }: { data: ProcessedDataRow[], comparisons: Comparison[] }) {
+  const includedComparisons = comparisons.filter(c => c.included);
+  if (includedComparisons.length <= 1) return null;
+
+  const summaryData = useMemo(() => {
+    return includedComparisons.map(comp => {
+      const compData = data.filter(d => d.comparisonId === comp.id && d.isUsable && d.apttCurrent !== null && d.apttNew !== null);
+      const deltas = compData.map(d => (d.apttCurrent as number) - (d.apttNew as number));
+      const n = deltas.length;
+      if (n < 2) return null;
+
+      const mean = deltas.reduce((a, b) => a + b, 0) / n;
+      const sd = calculateSD(deltas);
+      const se = sd / Math.sqrt(n);
+      const ci95 = 1.96 * se;
+
+      return {
+        id: comp.id,
+        label: comp.label,
+        year: comp.year,
+        mean,
+        se,
+        ciLower: mean - ci95,
+        ciUpper: mean + ci95,
+        error: [ci95, ci95],
+        n,
+        propPositive: deltas.filter(v => v > 0).length / n
+      };
+    }).filter((d): d is NonNullable<typeof d> => d !== null);
+  }, [data, includedComparisons]);
+
+  if (summaryData.length <= 1) return null;
+
+  return (
+    <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-amber-50 rounded-full flex items-center justify-center text-amber-600">
+            <History size={20} />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Historical Shift Summary</h4>
+            <p className="text-xs text-black/40">Average lot-to-lot bias across comparisons.</p>
+          </div>
+        </div>
+        <InfoTooltip content="This plot summarises the average lot shift for each comparison and helps identify years/comparisons with larger apparent lot effects." />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+        <div className="lg:col-span-2 h-[300px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={summaryData} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#00000008" />
+              <XAxis 
+                dataKey="label" 
+                axisLine={false}
+                tickLine={false}
+                tick={{ fontSize: 10, fill: '#00000040', fontWeight: 600 }}
+              />
+              <YAxis 
+                axisLine={false}
+                tickLine={false}
+                tick={{ fontSize: 10, fill: '#00000040', fontWeight: 600 }}
+                label={{ value: 'Mean Difference (s)', angle: -90, position: 'insideLeft', style: { fontSize: 10, fill: '#00000040', fontWeight: 600 } }}
+              />
+              <Tooltip 
+                contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1)', fontSize: '11px' }}
+              />
+              <ReferenceLine y={0} stroke="#000" strokeWidth={1} strokeOpacity={0.2} />
+              <Scatter dataKey="mean" fill="#f59e0b">
+                <ErrorBar dataKey="error" width={4} strokeWidth={2} stroke="#f59e0b" direction="y" />
+              </Scatter>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="border-b border-black/5">
+                <th className="pb-3 text-[9px] font-bold uppercase tracking-widest text-black/40">Comparison</th>
+                <th className="pb-3 text-[9px] font-bold uppercase tracking-widest text-black/40 text-center">n</th>
+                <th className="pb-3 text-[9px] font-bold uppercase tracking-widest text-black/40 text-center">Mean Diff</th>
+                <th className="pb-3 text-[9px] font-bold uppercase tracking-widest text-black/40 text-center">95% CI</th>
+                <th className="pb-3 text-[9px] font-bold uppercase tracking-widest text-black/40 text-center">Prop {'>'} 0</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-black/5">
+              {summaryData.map(row => (
+                <tr key={row.id}>
+                  <td className="py-3 text-[10px] font-bold text-black">{row.label}</td>
+                  <td className="py-3 text-[10px] font-mono text-center text-black/60">{row.n}</td>
+                  <td className="py-3 text-[10px] font-mono text-center font-bold">{row.mean.toFixed(2)}s</td>
+                  <td className="py-3 text-[10px] font-mono text-center text-black/40">
+                    [{row.ciLower.toFixed(1)}, {row.ciUpper.toFixed(1)}]
+                  </td>
+                  <td className="py-3 text-[10px] font-mono text-center">
+                    {(row.propPositive * 100).toFixed(1)}%
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MethodRobustnessPanel({ results }: { results: AnalysisResults }) {
   const sensitivity = results.sensitivityAnalysis;
   if (!sensitivity || !sensitivity.enabled) return null;
@@ -845,12 +1507,134 @@ function MethodRobustnessPanel({ results }: { results: AnalysisResults }) {
           </tbody>
         </table>
       </div>
+      
+      {sensitivity.spread && (
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+          <div className="lg:col-span-1 bg-black/[0.02] p-6 rounded-2xl border border-black/5 flex flex-col justify-between">
+            <div className="space-y-4">
+              <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Between-Method Spread</h5>
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-black/60">Lower Limit Δ</span>
+                  <span className="text-xs font-mono font-bold">{sensitivity.spread.lower.toFixed(1)}s</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-black/60">Upper Limit Δ</span>
+                  <span className="text-xs font-mono font-bold">{sensitivity.spread.upper.toFixed(1)}s</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-black/60">Width Δ</span>
+                  <span className="text-xs font-mono font-bold">{sensitivity.spread.width.toFixed(1)}s</span>
+                </div>
+                <div className="pt-2 border-t border-black/5">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] text-black/60">Disagreement Level</span>
+                    <span className={cn(
+                      "px-2 py-1 rounded text-[9px] font-bold uppercase text-center",
+                      sensitivity.spread.classification === 'low disagreement' ? "bg-emerald-50 text-emerald-600" :
+                      sensitivity.spread.classification === 'moderate disagreement' ? "bg-amber-50 text-amber-600" : "bg-red-50 text-red-600"
+                    )}>
+                      {sensitivity.spread.classification}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-6 pt-4 border-t border-black/5">
+              <p className="text-[9px] text-black/40 leading-relaxed italic">
+                This summary shows how much the proposed limits vary across modelling methods.
+              </p>
+            </div>
+          </div>
 
-      {!sensitivity.overallAgreement && (
+          <div className="lg:col-span-3 bg-black/[0.01] p-6 rounded-2xl border border-black/5 space-y-6">
+            <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Visual Method Comparison</h5>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              {/* Lower Limit Comparison */}
+              <div className="space-y-4">
+                <p className="text-[9px] font-bold uppercase tracking-widest text-black/30 text-center">Lower Limit (s)</p>
+                <div className="h-[120px] w-full flex items-end justify-around gap-2 px-2">
+                  {[
+                    { name: results.regressionMethod, val: results.proposedRange.lower, isPrimary: true },
+                    ...sensitivity.results.map(r => ({ name: r.method, val: r.proposedRange.lower, isPrimary: false }))
+                  ].map((m, i) => (
+                    <div key={i} className="flex flex-col items-center gap-2 flex-1 group relative">
+                      <div 
+                        className={cn(
+                          "w-full rounded-t-lg transition-all",
+                          m.isPrimary ? "bg-emerald-500" : "bg-black/10 group-hover:bg-black/20"
+                        )}
+                        style={{ height: `${(m.val / 140) * 100}%` }}
+                      />
+                      <span className="text-[8px] font-mono font-bold">{m.val}</span>
+                      <div className="absolute -bottom-4 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap bg-black text-white text-[8px] px-1.5 py-0.5 rounded z-10">
+                        {m.name}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Upper Limit Comparison */}
+              <div className="space-y-4">
+                <p className="text-[9px] font-bold uppercase tracking-widest text-black/30 text-center">Upper Limit (s)</p>
+                <div className="h-[120px] w-full flex items-end justify-around gap-2 px-2">
+                  {[
+                    { name: results.regressionMethod, val: results.proposedRange.upper, isPrimary: true },
+                    ...sensitivity.results.map(r => ({ name: r.method, val: r.proposedRange.upper, isPrimary: false }))
+                  ].map((m, i) => (
+                    <div key={i} className="flex flex-col items-center gap-2 flex-1 group relative">
+                      <div 
+                        className={cn(
+                          "w-full rounded-t-lg transition-all",
+                          m.isPrimary ? "bg-indigo-500" : "bg-black/10 group-hover:bg-black/20"
+                        )}
+                        style={{ height: `${(m.val / 140) * 100}%` }}
+                      />
+                      <span className="text-[8px] font-mono font-bold">{m.val}</span>
+                      <div className="absolute -bottom-4 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap bg-black text-white text-[8px] px-1.5 py-0.5 rounded z-10">
+                        {m.name}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Width Comparison */}
+              <div className="space-y-4">
+                <p className="text-[9px] font-bold uppercase tracking-widest text-black/30 text-center">Therapeutic Width (s)</p>
+                <div className="h-[120px] w-full flex items-end justify-around gap-2 px-2">
+                  {[
+                    { name: results.regressionMethod, val: results.proposedRange.upper - results.proposedRange.lower, isPrimary: true },
+                    ...sensitivity.results.map(r => ({ name: r.method, val: r.width, isPrimary: false }))
+                  ].map((m, i) => (
+                    <div key={i} className="flex flex-col items-center gap-2 flex-1 group relative">
+                      <div 
+                        className={cn(
+                          "w-full rounded-t-lg transition-all",
+                          m.isPrimary ? "bg-amber-500" : "bg-black/10 group-hover:bg-black/20"
+                        )}
+                        style={{ height: `${(m.val / 60) * 100}%` }}
+                      />
+                      <span className="text-[8px] font-mono font-bold">{m.val.toFixed(1)}</span>
+                      <div className="absolute -bottom-4 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap bg-black text-white text-[8px] px-1.5 py-0.5 rounded z-10">
+                        {m.name}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(!sensitivity.overallAgreement || (sensitivity.spread && sensitivity.spread.classification === 'high disagreement')) && (
         <div className="p-6 bg-red-50 rounded-2xl border border-red-100 space-y-2">
           <h5 className="text-xs font-bold text-red-900 uppercase tracking-widest">Caution: Methodological Variance</h5>
           <p className="text-xs text-red-800/70 leading-relaxed">
-            {sensitivity.disagreementReason}. The primary regression model produces results that differ significantly from alternative statistical methods. 
+            {sensitivity.disagreementReason || 'High spread detected across modelling methods'}. The primary regression model produces results that differ significantly from alternative statistical methods. 
             This often occurs in datasets with high leverage points, non-linear relationships, or significant outliers. 
             Manual verification of the regression plots for all methods is strongly recommended.
           </p>
@@ -2975,7 +3759,12 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Historical & Trend Context (Integrated V1.1) */}
+                  {/* Support Diagnostics Card */}
+                  <div className="lg:col-span-1">
+                    <SupportDiagnosticsPanel results={activeResults!} />
+                  </div>
+
+                  {/* Historical & Trend Context */}
                   <div className="lg:col-span-3 space-y-8">
                     <div className="flex items-center gap-4 mb-2">
                       <div className="h-px flex-1 bg-black/5" />
@@ -2987,8 +3776,20 @@ export default function App() {
                     </div>
                     
                     <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-                      {activeResults && <DescriptiveDataOverview data={rawData} comparisons={comparisons} config={analysisConfig} />}
-                      {activeResults && <TemporalSignalPanel results={activeResults} />}
+                      <div className="space-y-8">
+                        {activeResults && <HistoricalShiftSummary data={rawData} comparisons={comparisons} />}
+                        <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-4">
+                          <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Historical Stability Note</h4>
+                          <p className="text-xs text-black/60 leading-relaxed">
+                            The historical shift summary tracks the mean paired difference across reagent lot transitions. 
+                            Consistent shifts near zero indicate high analytical stability, while significant deviations 
+                            may suggest reagent sensitivity changes or population drift.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="space-y-8">
+                        {activeResults && <TemporalSignalPanel results={activeResults} />}
+                      </div>
                     </div>
 
                     <div className="bg-blue-50/50 border border-blue-100/50 p-4 rounded-2xl flex items-start gap-3">
@@ -3199,6 +4000,11 @@ export default function App() {
                         Predictions based on therapeutic Anti-Xa range of {analysisConfig.therapeuticXaRange.lower} – {analysisConfig.therapeuticXaRange.upper} IU/mL.
                       </p>
                     </div>
+                  </div>
+
+                  {/* Support Diagnostics Card */}
+                  <div className="col-span-1 md:col-span-2">
+                    <SupportDiagnosticsPanel results={activeResults!} />
                   </div>
 
                   {/* Uncertainty Summary Card */}

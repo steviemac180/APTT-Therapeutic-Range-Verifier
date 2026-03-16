@@ -5,6 +5,7 @@ import { fitDemingRegression, predictRange, fitOLSRegression, fitPassingBablokRe
 import { calculateMisclassificationRates } from './analysis/misclassification';
 import { generateRecommendations } from './analysis/recommendation';
 import { analyzeTemporalSignals } from './analysis/temporal';
+import { calculateSupportDiagnostics } from './analysis/support';
 
 const runBootstrap = (data: ProcessedDataRow[], config: AnalysisConfig, iterations: number): Promise<any> => {
   return new Promise((resolve, reject) => {
@@ -95,7 +96,11 @@ export const runAnalysis = async (
     config
   );
 
-  // 6. Sensitivity Analysis
+  // 6. Support Diagnostics
+  const supportDiagnostics = calculateSupportDiagnostics(data, comparisons, config);
+  const primarySupport = supportDiagnostics.find(d => d.isPrimary);
+
+  // 7. Sensitivity Analysis
   let sensitivityAnalysis: AnalysisResults['sensitivityAnalysis'] = undefined;
   if (config.enableSensitivityAnalysis) {
     const sensitivityResults: any[] = [];
@@ -154,16 +159,42 @@ export const runAnalysis = async (
       
       return { ...res, agreement };
     });
+    
+    // Calculate Spreads
+    const allLower = [proposedRange.lower, ...sensitivityResults.map(r => r.proposedRange.lower)];
+    const allUpper = [proposedRange.upper, ...sensitivityResults.map(r => r.proposedRange.upper)];
+    const allWidths = [proposedRange.upper - proposedRange.lower, ...sensitivityResults.map(r => r.width)];
+    
+    const lowerSpread = Math.max(...allLower) - Math.min(...allLower);
+    const upperSpread = Math.max(...allUpper) - Math.min(...allUpper);
+    const widthSpread = Math.max(...allWidths) - Math.min(...allWidths);
+    
+    const maxSpread = Math.max(lowerSpread, upperSpread, widthSpread);
+    let classification: 'low disagreement' | 'moderate disagreement' | 'high disagreement' = 'low disagreement';
+    
+    if (maxSpread >= 3.0) {
+      classification = 'high disagreement';
+      overallAgreement = false;
+      if (!disagreementReason) disagreementReason = 'High spread detected across modelling methods';
+    } else if (maxSpread >= 1.5) {
+      classification = 'moderate disagreement';
+    }
 
     sensitivityAnalysis = {
       enabled: true,
       results: finalResults,
       overallAgreement,
-      disagreementReason
+      disagreementReason,
+      spread: {
+        lower: lowerSpread,
+        upper: upperSpread,
+        width: widthSpread,
+        classification
+      }
     };
   }
 
-  // 7. Confidence & Recommendations
+  // 8. Confidence & Recommendations
   const dataQuality = {
     flags: summary.qc.flaggedUsableCount > 0 ? ['Data quality concerns were flagged during pre-analysis validation'] : [],
     usableCount: activeData.length,
@@ -177,10 +208,11 @@ export const runAnalysis = async (
     { lowerShiftInterval, upperShiftInterval, widthShiftInterval },
     dataQuality,
     { method: newModel.method, reason: newModel.reason },
-    sensitivityAnalysis
+    sensitivityAnalysis,
+    primarySupport
   );
 
-  // 8. Temporal Analysis
+  // 9. Temporal Analysis
   const temporalSignal = analyzeTemporalSignals(data, comparisons, config);
 
   return {
@@ -210,6 +242,7 @@ export const runAnalysis = async (
       widthShiftInterval,
       iterations
     },
+    supportDiagnostics,
     temporalSignal,
     sensitivityAnalysis
   };

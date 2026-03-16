@@ -150,6 +150,23 @@ export interface MisclassificationData {
   matrix: ConfusionMatrix;
 }
 
+export interface SupportDiagnostics {
+  totalUsable: number;
+  therapeuticCount: number;
+  therapeuticPercentage: number;
+  xaMin: number;
+  xaMax: number;
+  lowerLimitSupport: 'Adequate' | 'Limited' | 'Poor';
+  upperLimitSupport: 'Adequate' | 'Limited' | 'Poor';
+  censoredCount: number;
+  censoredPercentage: number;
+  coverageStatus: 'Good support' | 'Moderate support' | 'Weak support';
+  interpretation: string;
+  comparisonId: string;
+  comparisonLabel: string;
+  isPrimary: boolean;
+}
+
 export interface AnalysisResults {
   summary: SummaryResults;
   decision: DecisionCategory;
@@ -186,6 +203,7 @@ export interface AnalysisResults {
     widthShiftInterval: [number, number];
     iterations: number;
   };
+  supportDiagnostics: SupportDiagnostics[];
   temporalSignal?: {
     possible: boolean;
     status: 'absent' | 'possible' | 'repeated' | 'insufficient_data';
@@ -219,6 +237,12 @@ export interface AnalysisResults {
     }[];
     overallAgreement: boolean;
     disagreementReason?: string;
+    spread?: {
+      lower: number;
+      upper: number;
+      width: number;
+      classification: 'low disagreement' | 'moderate disagreement' | 'high disagreement';
+    };
   };
 }
 

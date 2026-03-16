@@ -1,4 +1,4 @@
-import { AnalysisResults, Range, DecisionCategory, ConfidenceLevel } from '../../types';
+import { AnalysisResults, Range, DecisionCategory, ConfidenceLevel, SupportDiagnostics } from '../../types';
 
 export const generateRecommendations = (
   shifts: { lower: number; upper: number; width: number },
@@ -18,7 +18,8 @@ export const generateRecommendations = (
     method: 'Weighted Deming' | 'Standard Deming';
     reason?: string;
   },
-  sensitivityAnalysis?: AnalysisResults['sensitivityAnalysis']
+  sensitivityAnalysis?: AnalysisResults['sensitivityAnalysis'],
+  primarySupport?: SupportDiagnostics
 ) => {
   let decision: DecisionCategory = 'No change';
   let confidence: ConfidenceLevel = 'High confidence';
@@ -33,6 +34,15 @@ export const generateRecommendations = (
     confidence = 'Low confidence';
   } else if (dataQuality.usableCount < 45 || dataQuality.flags.length > 0) {
     confidence = 'Moderate confidence';
+  }
+
+  // Support Diagnostics impact on confidence
+  if (primarySupport) {
+    if (primarySupport.coverageStatus === 'Weak support') {
+      confidence = 'Low confidence';
+    } else if (primarySupport.coverageStatus === 'Moderate support' && confidence === 'High confidence') {
+      confidence = 'Moderate confidence';
+    }
   }
 
   // Sensitivity Analysis impact on confidence
@@ -58,10 +68,17 @@ export const generateRecommendations = (
     decision = 'Review required';
   }
 
+  if (primarySupport && primarySupport.coverageStatus === 'Weak support') {
+    decision = 'Review required';
+  }
+
   // 4. Generate Warnings
   if (dataQuality.hasCensored) warnings.push('Censored values (APTT >= 139 or Xa >= 1.5) are present in the dataset, which may bias the regression.');
   if (dataQuality.excludedComparisonsCount > 0) warnings.push(`${dataQuality.excludedComparisonsCount} comparison(s) were excluded from this analysis.`);
   if (confidence === 'Low confidence') warnings.push('Statistical confidence is low due to limited data or high variability.');
+  if (primarySupport && primarySupport.coverageStatus !== 'Good support') {
+    warnings.push(`Data Sufficiency: ${primarySupport.interpretation}`);
+  }
   if (dataQuality.flags.length > 0) warnings.push('Data quality concerns were flagged during pre-analysis validation.');
   if (regressionInfo.method === 'Standard Deming') warnings.push('Weighted Deming failed to converge; standard Deming regression was used as a fallback.');
   if (sensitivityAnalysis?.enabled && !sensitivityAnalysis.overallAgreement) {
