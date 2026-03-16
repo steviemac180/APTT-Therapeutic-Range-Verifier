@@ -189,6 +189,8 @@ export interface AnalysisResults {
   temporalSignal?: {
     possible: boolean;
     status: 'absent' | 'possible' | 'repeated' | 'insufficient_data';
+    linkageMethod?: 'lot-ID-based' | 'year-based fallback assumption';
+    isAmbiguous?: boolean;
     metrics: {
       year: number;
       slope: number;
@@ -196,6 +198,12 @@ export interface AnalysisResults {
       r2: number;
       n: number;
       label: string;
+      // Link-specific metrics
+      linkLabel?: string;
+      shiftAtLower?: number;
+      shiftAtUpper?: number;
+      avgShift?: number;
+      widthChange?: number;
     }[];
     interpretation: string;
   };

@@ -26,7 +26,8 @@ import {
   Save,
   TrendingUp,
   TrendingDown,
-  Activity
+  Activity,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -79,6 +80,8 @@ import {
 import { runAnalysis } from './services/statsService';
 import { calculateSingleRangeMisclassification } from './services/analysis/misclassification';
 import { getDemoData, DemoScenario } from './services/demoData';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 
 // Utility for tailwind classes
 function cn(...inputs: ClassValue[]) {
@@ -135,6 +138,12 @@ function generateAssumptionsAndLimitations(results: AnalysisResults, config: Ana
   if (config.riskWeights.subToSupra > 5 || config.riskWeights.supraToSub > 5) {
     limitations.push("High risk weighting applied to major misclassifications; results are heavily biased towards safety over sensitivity.");
   }
+
+  if (results.temporalSignal?.linkageMethod === 'year-based fallback assumption') {
+    limitations.push("Trend analysis used year-based fallback linkage due to missing lot IDs in the provided dataset.");
+  }
+
+  limitations.push("Descriptive overview is provided for historical context and visual distribution check only.");
 
   return { assumptions, limitations };
 }
@@ -286,6 +295,299 @@ function RegressionVisualization({ data, results, config }: { data: ProcessedDat
   );
 }
 
+function DescriptiveDataOverview({ data, comparisons, config }: { data: ProcessedDataRow[], comparisons: Comparison[], config: AnalysisConfig }) {
+  const [pairedDiffTab, setPairedDiffTab] = useState<'all' | 'therapeutic'>('all');
+  const includedComparisons = comparisons.filter(c => c.included);
+  const includedIds = new Set(includedComparisons.map(c => c.id));
+  const usableData = data.filter(d => d.isUsable && d.comparisonId && includedIds.has(d.comparisonId));
+  
+  const getStats = (values: number[]) => {
+    if (values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const min = sorted[0];
+    const max = sorted[sorted.length - 1];
+    const q1 = sorted[Math.floor(sorted.length * 0.25)];
+    const median = sorted[Math.floor(sorted.length * 0.5)];
+    const q3 = sorted[Math.floor(sorted.length * 0.75)];
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const iqr = q3 - q1;
+    return { min, q1, median, q3, max, mean, iqr, count: values.length };
+  };
+
+  const comparisonStats = includedComparisons.map(comp => {
+    const compData = usableData.filter(d => d.comparisonId === comp.id);
+    const deltaApttValues = compData
+      .filter(d => d.apttCurrent !== null && d.apttNew !== null)
+      .map(d => (d.apttCurrent as number) - (d.apttNew as number));
+
+    const therapeuticData = compData.filter(d => 
+      d.xa !== null && 
+      d.xa >= config.therapeuticXaRange.lower && 
+      d.xa <= config.therapeuticXaRange.upper
+    );
+    const therapeuticDeltaApttValues = therapeuticData
+      .filter(d => d.apttCurrent !== null && d.apttNew !== null)
+      .map(d => (d.apttCurrent as number) - (d.apttNew as number));
+
+    return {
+      id: comp.id,
+      label: comp.label,
+      year: comp.year,
+      xa: getStats(compData.map(d => d.xa).filter((v): v is number => v !== null)),
+      apttNew: getStats(compData.map(d => d.apttNew).filter((v): v is number => v !== null)),
+      apttCurrent: getStats(compData.map(d => d.apttCurrent).filter((v): v is number => v !== null)),
+      deltaAptt: getStats(deltaApttValues),
+      propAboveZero: deltaApttValues.length > 0 ? deltaApttValues.filter(v => v > 0).length / deltaApttValues.length : 0,
+      therapeuticDeltaAptt: getStats(therapeuticDeltaApttValues),
+      therapeuticPropAboveZero: therapeuticDeltaApttValues.length > 0 ? therapeuticDeltaApttValues.filter(v => v > 0).length / therapeuticDeltaApttValues.length : 0
+    };
+  });
+
+  const BoxPlot = ({ stats, color, label, domain, showZeroLine = false }: { stats: any, color: string, label: string, domain: [number, number], showZeroLine?: boolean }) => {
+    if (!stats) return null;
+    const range = domain[1] - domain[0];
+    const scale = (val: number) => ((val - domain[0]) / range) * 100;
+
+    return (
+      <div className="relative h-12 w-full flex items-center">
+        <div className="absolute left-0 right-0 h-px bg-black/10" />
+        {showZeroLine && domain[0] < 0 && domain[1] > 0 && (
+          <div className="absolute top-0 bottom-0 w-px bg-black/20 z-0" style={{ left: `${scale(0)}%` }} />
+        )}
+        {/* Whisker */}
+        <div className="absolute h-px bg-black/40" style={{ left: `${scale(stats.min)}%`, width: `${scale(stats.max) - scale(stats.min)}%` }} />
+        <div className="absolute w-px h-3 bg-black/40" style={{ left: `${scale(stats.min)}%` }} />
+        <div className="absolute w-px h-3 bg-black/40" style={{ left: `${scale(stats.max)}%` }} />
+        {/* Box */}
+        <div 
+          className="absolute h-6 rounded-sm border border-black/20" 
+          style={{ 
+            left: `${scale(stats.q1)}%`, 
+            width: `${scale(stats.q3) - scale(stats.q1)}%`,
+            backgroundColor: color 
+          }} 
+        />
+        {/* Median */}
+        <div className="absolute w-px h-6 bg-black" style={{ left: `${scale(stats.median)}%` }} />
+        {/* Labels */}
+        <div className="absolute -top-4 text-[8px] font-bold text-black/40" style={{ left: `${scale(stats.min)}%` }}>{stats.min.toFixed(1)}</div>
+        <div className="absolute -top-4 text-[8px] font-bold text-black/40" style={{ left: `${scale(stats.max)}%` }}>{stats.max.toFixed(1)}</div>
+        <div className="absolute -bottom-4 text-[8px] font-bold text-black" style={{ left: `${scale(stats.median)}%`, transform: 'translateX(-50%)' }}>{stats.median.toFixed(1)}</div>
+      </div>
+    );
+  };
+
+  const xaDomain: [number, number] = [0, 1.5];
+  const apttDomain: [number, number] = [20, 140];
+  
+  // Calculate a reasonable domain for delta APTT centered around 0
+  const allDeltas = comparisonStats.flatMap(cs => {
+    const deltas = [];
+    if (cs.deltaAptt) deltas.push(cs.deltaAptt.min, cs.deltaAptt.max);
+    if (cs.therapeuticDeltaAptt) deltas.push(cs.therapeuticDeltaAptt.min, cs.therapeuticDeltaAptt.max);
+    return deltas;
+  });
+  const maxAbsDelta = Math.max(20, ...allDeltas.map(Math.abs));
+  const deltaApttDomain: [number, number] = [-maxAbsDelta, maxAbsDelta];
+
+  return (
+    <div className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm space-y-8">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-emerald-50 rounded-full flex items-center justify-center text-emerald-600">
+            <BarChart3 size={20} />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Descriptive data overview</h4>
+            <p className="text-xs text-black/40">Year-to-year distribution shifts analysis.</p>
+          </div>
+        </div>
+      </div>
+
+      <p className="text-xs text-black/60 leading-relaxed italic border-l-2 border-emerald-500 pl-4">
+        These plots are descriptive and intended to provide a rapid visual check for year-to-year distribution shifts before formal modelling.
+      </p>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-12">
+        <div className="space-y-8">
+          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">anti-Xa Distribution by Comparison</h5>
+          <div className="space-y-10">
+            {comparisonStats.map(cs => (
+              <div key={cs.id} className="space-y-2">
+                <div className="flex justify-between items-end">
+                  <span className="text-xs font-bold text-black">{cs.label}</span>
+                  <span className="text-[10px] text-black/40 font-medium">n={cs.xa?.count}</span>
+                </div>
+                <BoxPlot stats={cs.xa} color="rgba(16, 185, 129, 0.1)" label="anti-Xa" domain={xaDomain} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-8">
+          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-4">APTT New Lot Distribution by Comparison</h5>
+          <div className="space-y-10">
+            {comparisonStats.map(cs => (
+              <div key={cs.id} className="space-y-2">
+                <div className="flex justify-between items-end">
+                  <span className="text-xs font-bold text-black">{cs.label}</span>
+                  <span className="text-[10px] text-black/40 font-medium">n={cs.apttNew?.count}</span>
+                </div>
+                <BoxPlot stats={cs.apttNew} color="rgba(99, 102, 241, 0.1)" label="APTT New" domain={apttDomain} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-8">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Paired APTT Lot Differences</h5>
+              <div className="flex bg-black/[0.03] p-0.5 rounded-lg">
+                <button 
+                  onClick={() => setPairedDiffTab('all')}
+                  className={cn(
+                    "px-2 py-1 text-[9px] font-bold uppercase tracking-tight rounded-md transition-all",
+                    pairedDiffTab === 'all' ? "bg-white text-black shadow-sm" : "text-black/40 hover:text-black/60"
+                  )}
+                >
+                  All Data
+                </button>
+                <button 
+                  onClick={() => setPairedDiffTab('therapeutic')}
+                  className={cn(
+                    "px-2 py-1 text-[9px] font-bold uppercase tracking-tight rounded-md transition-all",
+                    pairedDiffTab === 'therapeutic' ? "bg-white text-black shadow-sm" : "text-black/40 hover:text-black/60"
+                  )}
+                >
+                  Therapeutic
+                </button>
+              </div>
+            </div>
+            {pairedDiffTab === 'all' ? (
+              <p className="text-[9px] text-black/30 font-medium italic leading-tight">
+                Paired difference = Current lot APTT minus New lot APTT for the same sample. Includes all usable data.
+              </p>
+            ) : (
+              <p className="text-[9px] text-emerald-600/60 font-medium italic leading-tight">
+                Restricted to samples within the therapeutic anti-Xa range ({config.therapeuticXaRange.lower} – {config.therapeuticXaRange.upper} IU/mL).
+              </p>
+            )}
+          </div>
+          <div className="space-y-10">
+            {comparisonStats.map(cs => (
+              <div key={cs.id} className="space-y-2">
+                <div className="flex justify-between items-end">
+                  <span className="text-xs font-bold text-black">{cs.label}</span>
+                  <span className="text-[10px] text-black/40 font-medium">
+                    n={pairedDiffTab === 'all' ? cs.deltaAptt?.count : cs.therapeuticDeltaAptt?.count}
+                  </span>
+                </div>
+                <BoxPlot 
+                  stats={pairedDiffTab === 'all' ? cs.deltaAptt : cs.therapeuticDeltaAptt} 
+                  color={pairedDiffTab === 'all' ? "rgba(245, 158, 11, 0.1)" : "rgba(16, 185, 129, 0.1)"} 
+                  label="Delta APTT" 
+                  domain={deltaApttDomain} 
+                  showZeroLine={true} 
+                />
+              </div>
+            ))}
+          </div>
+          <p className="text-[9px] text-black/40 font-medium bg-black/[0.02] p-2 rounded-lg border border-black/5">
+            {pairedDiffTab === 'all' 
+              ? "Positive values indicate the current lot tends to read higher than the new lot across the full range."
+              : "Focuses on the clinically relevant region. Positive values indicate current lot bias within the therapeutic window."}
+          </p>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto pt-4">
+        <div className="mb-4 flex items-center justify-between">
+          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">
+            {pairedDiffTab === 'all' ? 'Paired Difference Summary Metrics (All Data)' : 'Paired Difference Summary Metrics (Therapeutic Range Only)'}
+          </h5>
+          {pairedDiffTab === 'therapeutic' && (
+            <span className="text-[9px] font-bold text-emerald-600/40 uppercase tracking-widest">
+              Range: {config.therapeuticXaRange.lower} – {config.therapeuticXaRange.upper} IU/mL
+            </span>
+          )}
+        </div>
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-black/5">
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40">Comparison</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">n</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Mean Diff</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Median Diff</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">IQR</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Prop {'>'} 0</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-black/5">
+            {comparisonStats.map(cs => {
+              const stats = pairedDiffTab === 'all' ? cs.deltaAptt : cs.therapeuticDeltaAptt;
+              const prop = pairedDiffTab === 'all' ? cs.propAboveZero : cs.therapeuticPropAboveZero;
+              
+              return (
+                <tr key={cs.id}>
+                  <td className="py-4 text-xs font-bold text-black">{cs.label}</td>
+                  <td className="py-4 text-xs font-mono text-center text-black/60">{stats?.count || 0}</td>
+                  <td className="py-4 text-xs font-mono text-center">
+                    {stats ? `${stats.mean.toFixed(2)}s` : '-'}
+                  </td>
+                  <td className="py-4 text-xs font-mono text-center">
+                    {stats ? `${stats.median.toFixed(1)}s` : '-'}
+                  </td>
+                  <td className="py-4 text-xs font-mono text-center">
+                    {stats ? `${stats.iqr.toFixed(1)}s` : '-'}
+                  </td>
+                  <td className="py-4 text-xs font-mono text-center">
+                    {stats ? `${(prop * 100).toFixed(1)}%` : '-'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="overflow-x-auto pt-4">
+        <div className="mb-4">
+          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Lot Distribution Summary</h5>
+        </div>
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-black/5">
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40">Comparison</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">n</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">Xa Mean/Med</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">APTT New Mean/Med</th>
+              <th className="pb-4 text-[10px] font-bold uppercase tracking-widest text-black/40 text-center">APTT Cur Mean/Med</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-black/5">
+            {comparisonStats.map(cs => (
+              <tr key={cs.id}>
+                <td className="py-4 text-xs font-bold text-black">{cs.label}</td>
+                <td className="py-4 text-xs font-mono text-center text-black/60">{cs.xa?.count}</td>
+                <td className="py-4 text-xs font-mono text-center">
+                  {cs.xa?.mean.toFixed(2)} / {cs.xa?.median.toFixed(2)}
+                </td>
+                <td className="py-4 text-xs font-mono text-center">
+                  {cs.apttNew?.mean.toFixed(1)} / {cs.apttNew?.median.toFixed(1)}
+                </td>
+                <td className="py-4 text-xs font-mono text-center">
+                  {cs.apttCurrent?.mean.toFixed(1)} / {cs.apttCurrent?.median.toFixed(1)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
   const signal = results.temporalSignal;
   
@@ -300,12 +602,13 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
           </div>
           <div>
             <h4 className="text-sm font-bold uppercase tracking-widest text-black/40">Trend / Temporal Signal Analysis</h4>
-            <p className="text-[10px] text-black/30 font-medium">Contextual assessment inactive.</p>
+            <p className="text-[10px] text-black/30 font-medium">Status: Not Assessable</p>
           </div>
         </div>
         <div className="bg-black/[0.02] p-6 rounded-2xl border border-dashed border-black/10">
           <p className="text-xs text-black/40 leading-relaxed italic">
-            {signal.interpretation} To enable temporal analysis, ensure your dataset includes successive comparisons where the 'New Lot ID' of one year matches the 'Current Lot ID' of the following year.
+            {signal.interpretation} 
+            {!signal.isAmbiguous && " To enable temporal analysis, ensure your dataset includes successive comparisons where the 'New Lot ID' of one year matches the 'Current Lot ID' of the following year."}
           </p>
         </div>
       </div>
@@ -321,7 +624,12 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
           </div>
           <div>
             <h4 className="text-sm font-bold uppercase tracking-widest text-black/80">Trend / Temporal Signal Analysis</h4>
-            <p className="text-xs text-black/40">Contextual assessment of lot behavior across successive years.</p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-[10px] text-black/40 font-bold uppercase tracking-widest">Status: Assessable</p>
+              <span className="text-[10px] text-indigo-600 font-bold uppercase tracking-widest bg-indigo-50 px-2 py-0.5 rounded-md">
+                {signal.linkageMethod}
+              </span>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -337,7 +645,7 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2">
+        <div className="lg:col-span-2 space-y-6">
           <div className="h-[240px] w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={signal.metrics}>
@@ -354,6 +662,7 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
                   tickLine={false} 
                   tick={{ fontSize: 10, fill: '#00000040', fontWeight: 600 }}
                   domain={['auto', 'auto']}
+                  label={{ value: 'Shift (s)', angle: -90, position: 'insideLeft', style: { fontSize: 10, fill: '#00000040', fontWeight: 600 } }}
                 />
                 <Tooltip 
                   contentStyle={{ 
@@ -366,19 +675,53 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
                 />
                 <Line 
                   type="monotone" 
-                  dataKey="slope" 
+                  dataKey="avgShift" 
                   stroke="#6366f1" 
                   strokeWidth={3} 
                   dot={{ r: 6, fill: '#6366f1', strokeWidth: 2, stroke: '#fff' }}
                   activeDot={{ r: 8, strokeWidth: 0 }}
-                  name="Regression Slope"
+                  name="Avg Shift (s)"
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="widthChange" 
+                  stroke="#10b981" 
+                  strokeWidth={2} 
+                  strokeDasharray="5 5"
+                  dot={{ r: 4, fill: '#10b981', strokeWidth: 2, stroke: '#fff' }}
+                  name="Width Change (s)"
                 />
               </LineChart>
             </ResponsiveContainer>
           </div>
-          <p className="mt-4 text-[10px] text-black/30 font-medium text-center uppercase tracking-widest">
-            Lot Sensitivity (Slope) Trend Across Linked Comparisons
-          </p>
+          
+          <div className="overflow-x-auto">
+            <table className="w-full text-[10px] text-left">
+              <thead>
+                <tr className="border-b border-black/5">
+                  <th className="pb-2 font-bold uppercase tracking-widest text-black/40">Linkage</th>
+                  <th className="pb-2 font-bold uppercase tracking-widest text-black/40 text-right">Shift Lower</th>
+                  <th className="pb-2 font-bold uppercase tracking-widest text-black/40 text-right">Shift Upper</th>
+                  <th className="pb-2 font-bold uppercase tracking-widest text-black/40 text-right">Avg Shift</th>
+                  <th className="pb-2 font-bold uppercase tracking-widest text-black/40 text-right">Width Δ</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-black/5">
+                {signal.metrics.map((m, i) => (
+                  <tr key={i}>
+                    <td className="py-2 font-bold text-black/60">{m.linkLabel}</td>
+                    <td className="py-2 font-bold text-right">{m.shiftAtLower?.toFixed(1)}s</td>
+                    <td className="py-2 font-bold text-right">{m.shiftAtUpper?.toFixed(1)}s</td>
+                    <td className={cn(
+                      "py-2 font-bold text-right",
+                      Math.abs(m.avgShift || 0) > 3 ? "text-red-600" : "text-black"
+                    )}>{m.avgShift?.toFixed(1)}s</td>
+                    <td className="py-2 font-bold text-right text-black/60">{m.widthChange?.toFixed(1)}s</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div className="space-y-6">
@@ -391,7 +734,7 @@ function TemporalSignalPanel({ results }: { results: AnalysisResults }) {
 
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-black/[0.02] p-4 rounded-xl border border-black/5">
-              <p className="text-[8px] font-bold text-black/30 uppercase tracking-widest mb-1">Linked Lots</p>
+              <p className="text-[8px] font-bold text-black/30 uppercase tracking-widest mb-1">Linked Transitions</p>
               <p className="text-lg font-bold text-black">{signal.metrics.length}</p>
             </div>
             <div className="bg-black/[0.02] p-4 rounded-xl border border-black/5">
@@ -504,7 +847,7 @@ function MethodRobustnessPanel({ results }: { results: AnalysisResults }) {
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('setup');
-  const [dashboardTab, setDashboardTab] = useState<'executive' | 'technical' | 'comparison'>('executive');
+  const [dashboardTab, setDashboardTab] = useState<'executive' | 'technical' | 'comparison' | 'exports'>('executive');
   const [setupStep, setSetupStep] = useState<SetupStep>('upload');
   
   // Data State
@@ -513,6 +856,7 @@ export default function App() {
   const [dataFlags, setDataFlags] = useState<string[]>([]);
   const [selectedRows, setSelectedRows] = useState<string[]>([]);
   const [isManualMode, setIsManualMode] = useState(false);
+  const [isDemoMode, setIsDemoMode] = useState(false);
   const [newComparisonLabel, setNewComparisonLabel] = useState('');
   const [comparisonSettings, setComparisonSettings] = useState<Record<string, { included: boolean, isPrimary: boolean, exclusionReason: string }>>({});
   
@@ -568,13 +912,106 @@ export default function App() {
   const [showConfusionMatrix, setShowConfusionMatrix] = useState(false);
   const [showSimulation, setShowSimulation] = useState(false);
   const [showReportEditor, setShowReportEditor] = useState(false);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const reportRef = React.useRef<HTMLDivElement>(null);
+
+  const handleDownloadPDF = async () => {
+    if (!reportRef.current) return;
+    
+    setIsGeneratingPDF(true);
+    try {
+      const element = reportRef.current;
+      // Temporarily show the report for capture
+      element.style.display = 'block';
+      element.style.position = 'fixed';
+      element.style.left = '-9999px';
+      element.style.top = '0';
+      element.style.width = '210mm'; // A4 width
+
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        windowWidth: 794, // A4 width in px at 96dpi
+      });
+
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`APTT_Validation_Report_${new Date().toISOString().split('T')[0]}.pdf`);
+      
+      // Restore original state
+      element.style.display = '';
+      element.style.position = '';
+      element.style.left = '';
+      element.style.top = '';
+      element.style.width = '';
+    } catch (error) {
+      console.error('PDF Generation Error:', error);
+    } finally {
+      setIsGeneratingPDF(false);
+    }
+  };
   const [reportCommentary, setReportCommentary] = useState<ReportCommentary>({
     executiveSummary: "The validation study for the new APTT reagent lot demonstrates acceptable correlation with the anti-Xa therapeutic range. The proposed therapeutic range maintains clinical safety while optimizing sensitivity to heparin therapy.",
     medicalDirectorNotes: "Based on the statistical analysis and misclassification risk assessment, the proposed range is approved for clinical use. No significant shift in clinical decision-making is expected.",
     technicalNotes: "The method comparison was performed using a representative sample set across the therapeutic spectrum. Quality control data and uncertainty of measurement were within acceptable laboratory limits.",
-    limitationsNotes: "This analysis is based on the provided dataset. Results should be interpreted in the context of clinical presentation and other coagulation parameters."
+    limitationsNotes: "This analysis is based on the provided dataset. Results should be interpreted in the context of clinical presentation and other coagulation parameters.\n\nNote: The descriptive data overview is provided for historical context and visual distribution check only."
   });
   const [simulatedRange, setSimulatedRange] = useState<Range | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  const resetAnalysis = () => {
+    setAppState('setup');
+    setDashboardTab('executive');
+    setSetupStep('upload');
+    setRawData([]);
+    setFileSummary(null);
+    setDataFlags([]);
+    setSelectedRows([]);
+    setIsManualMode(false);
+    setNewComparisonLabel('');
+    setComparisonSettings({});
+    setLabConfig({
+      labName: '',
+      organisation: '',
+      reportTitle: 'APTT Lot Verification Report',
+      analyser: '',
+      manufacturer: '',
+      assayName: ''
+    });
+    setAnalysisConfig({
+      currentApprovedRange: DEFAULT_APTT_RANGE,
+      therapeuticXaRange: DEFAULT_XA_RANGE,
+      muBands: DEFAULT_MU_BANDS(DEFAULT_XA_RANGE, DEFAULT_APTT_RANGE),
+      muUnits: DEFAULT_MU_UNITS,
+      analysisDepth: 'Standard',
+      includeMU: true,
+      enableSensitivityAnalysis: false,
+      riskWeights: DEFAULT_RISK_WEIGHTS
+    });
+    setResults(null);
+    setResultsNoMU(null);
+    setUseMU(true);
+    setIsAnalyzing(false);
+    setDemoScenario('no_change');
+    setShowConfusionMatrix(false);
+    setShowSimulation(false);
+    setShowReportEditor(false);
+    setReportCommentary({
+      executiveSummary: "The validation study for the new APTT reagent lot demonstrates acceptable correlation with the anti-Xa therapeutic range. The proposed therapeutic range maintains clinical safety while optimizing sensitivity to heparin therapy.",
+      medicalDirectorNotes: "Based on the statistical analysis and misclassification risk assessment, the proposed range is approved for clinical use. No significant shift in clinical decision-making is expected.",
+      technicalNotes: "The method comparison was performed using a representative sample set across the therapeutic spectrum. Quality control data and uncertainty of measurement were within acceptable laboratory limits.",
+      limitationsNotes: "This analysis is based on the provided dataset. Results should be interpreted in the context of clinical presentation and other coagulation parameters.\n\nNote: The descriptive data overview is provided for historical context and visual distribution check only."
+    });
+    setSimulatedRange(null);
+    setShowResetConfirm(false);
+    setIsDemoMode(false);
+  };
 
   const activeResults = useMU ? results : resultsNoMU;
 
@@ -806,6 +1243,7 @@ export default function App() {
     setFileSummary(summary);
     setLabConfig(demoLab);
     setAnalysisConfig(demoAnalysis);
+    setIsDemoMode(true);
     
     // Auto-detect comparisons for the demo data
     const { updatedData } = detectComparisons(data);
@@ -826,6 +1264,23 @@ export default function App() {
     setResults(resWithMU);
     setResultsNoMU(resWithoutMU);
     setSimulatedRange(resWithMU.proposedRange);
+    
+    // Update limitations notes based on results
+    setReportCommentary(prev => {
+      let notes = "This analysis is based on the provided dataset. Results should be interpreted in the context of clinical presentation and other coagulation parameters.";
+      
+      if (resWithMU.temporalSignal?.linkageMethod === 'year-based fallback assumption') {
+        notes += "\n\nNote: Trend analysis used year-based fallback linkage due to missing lot IDs in the provided dataset.";
+      }
+      
+      notes += "\n\nNote: The descriptive data overview is provided for historical context and visual distribution check only.";
+      
+      return {
+        ...prev,
+        limitationsNotes: notes
+      };
+    });
+
     setIsAnalyzing(false);
     setAppState('dashboard');
   };
@@ -845,22 +1300,153 @@ export default function App() {
         </div>
         
         <div className="flex items-center gap-4">
-          {appState === 'dashboard' && (
+          <nav className="flex items-center gap-1 mr-4">
             <button 
-              onClick={() => setAppState('setup')}
-              className="text-sm font-medium text-black/60 hover:text-black transition-colors flex items-center gap-2"
+              onClick={() => {
+                setAppState('setup');
+                setSetupStep('upload');
+              }}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all",
+                appState === 'setup' && setupStep === 'upload' 
+                  ? "bg-black text-white" 
+                  : "text-black/40 hover:text-black/60 hover:bg-black/5"
+              )}
             >
-              <Settings size={16} />
-              New Analysis
+              Home
+            </button>
+            <button 
+              onClick={() => {
+                if (rawData.length > 0) {
+                  setAppState('setup');
+                  if (setupStep === 'upload') setSetupStep('comparison');
+                }
+              }}
+              disabled={rawData.length === 0}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all",
+                appState === 'setup' && setupStep !== 'upload'
+                  ? "bg-black text-white" 
+                  : rawData.length === 0 
+                    ? "text-black/10 cursor-not-allowed" 
+                    : "text-black/40 hover:text-black/60 hover:bg-black/5"
+              )}
+            >
+              Setup
+            </button>
+            <button 
+              onClick={() => {
+                if (results) {
+                  setAppState('dashboard');
+                  setDashboardTab('executive');
+                }
+              }}
+              disabled={!results}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all",
+                appState === 'dashboard' && dashboardTab !== 'exports'
+                  ? "bg-black text-white" 
+                  : !results 
+                    ? "text-black/10 cursor-not-allowed" 
+                    : "text-black/40 hover:text-black/60 hover:bg-black/5"
+              )}
+            >
+              Results
+            </button>
+            <button 
+              onClick={() => {
+                if (results) {
+                  setAppState('dashboard');
+                  setDashboardTab('exports');
+                }
+              }}
+              disabled={!results}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all",
+                appState === 'dashboard' && dashboardTab === 'exports'
+                  ? "bg-black text-white" 
+                  : !results 
+                    ? "text-black/10 cursor-not-allowed" 
+                    : "text-black/40 hover:text-black/60 hover:bg-black/5"
+              )}
+            >
+              Downloads
+            </button>
+          </nav>
+
+          {isDemoMode && (
+            <button 
+              onClick={resetAnalysis}
+              className="text-xs font-bold uppercase tracking-widest bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg hover:bg-amber-200 transition-all flex items-center gap-2"
+            >
+              Exit Demo
             </button>
           )}
+
+          <button 
+            onClick={() => {
+              if (rawData.length > 0 || results) {
+                setShowResetConfirm(true);
+              } else {
+                resetAnalysis();
+              }
+            }}
+            className="text-xs font-bold uppercase tracking-widest bg-black text-white px-4 py-2 rounded-xl hover:bg-black/80 transition-all flex items-center gap-2 shadow-sm"
+          >
+            <RefreshCw size={14} />
+            Start Fresh Analysis
+          </button>
+
           <div className="h-4 w-px bg-black/10" />
           <div className="text-right">
             <p className="text-xs font-semibold text-black/80">{labConfig.labName || 'Guest Laboratory'}</p>
-            <p className="text-[10px] text-black/40 uppercase tracking-tighter">v1.0.0 Scaffold</p>
+            <p className="text-[10px] text-black/40 uppercase tracking-tighter">v1.1.0 Release</p>
           </div>
         </div>
       </header>
+
+      {/* Reset Confirmation Modal */}
+      <AnimatePresence>
+        {showResetConfirm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowResetConfirm(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white rounded-[32px] p-8 max-w-md w-full shadow-2xl border border-black/5"
+            >
+              <div className="w-12 h-12 bg-red-50 text-red-600 rounded-full flex items-center justify-center mb-6">
+                <AlertTriangle size={24} />
+              </div>
+              <h3 className="text-xl font-bold mb-2">Start Fresh Analysis?</h3>
+              <p className="text-black/50 text-sm leading-relaxed mb-8">
+                This will clear the current analysis, all uploaded data, and custom configurations. This action cannot be undone.
+              </p>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setShowResetConfirm(false)}
+                  className="flex-1 px-6 py-3 rounded-2xl font-bold text-sm border border-black/10 hover:bg-black/5 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={resetAnalysis}
+                  className="flex-1 px-6 py-3 rounded-2xl font-bold text-sm bg-red-600 text-white hover:bg-red-700 transition-all shadow-lg shadow-red-100"
+                >
+                  Yes, Start Fresh
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <main className="max-w-7xl mx-auto p-6 lg:p-10">
         <AnimatePresence mode="wait">
@@ -905,8 +1491,11 @@ export default function App() {
                       <Upload size={40} />
                     </div>
                     <h2 className="text-2xl font-semibold mb-2">Upload Verification Data</h2>
-                    <p className="text-black/50 max-w-md mb-8">
+                    <p className="text-black/50 max-w-md mb-4">
                       Select a CSV file containing Year, Xa, APTT New Lot, and APTT Current Lot columns.
+                    </p>
+                    <p className="text-[10px] text-black/30 font-bold uppercase tracking-widest mb-8">
+                      The system will automatically parse and validate your CSV structure.
                     </p>
                     
                     <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
@@ -1126,7 +1715,10 @@ export default function App() {
                     <div className="flex justify-between items-end">
                       <div>
                         <h2 className="text-2xl font-semibold mb-2">Comparison Review</h2>
-                        <p className="text-sm text-black/50">Verify detected comparisons and assign labels.</p>
+                        <p className="text-sm text-black/50 mb-1">Verify detected comparisons and assign labels.</p>
+                        <p className="text-[10px] text-black/30 font-bold uppercase tracking-widest">
+                          Define how your data should be grouped and which comparisons are primary for calculation.
+                        </p>
                       </div>
                       <button 
                         onClick={() => setIsManualMode(!isManualMode)}
@@ -2211,8 +2803,99 @@ export default function App() {
               </AnimatePresence>
 
               {/* Main Content Area */}
-              {dashboardTab === 'executive' ? (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              {dashboardTab === 'exports' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                  <div className="bg-white rounded-[32px] p-8 border border-black/5 shadow-sm space-y-6">
+                    <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600">
+                      <FileText size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-semibold tracking-tight">Executive Report</h3>
+                      <p className="text-sm text-black/40 mt-1">Full PDF validation report with summaries and charts.</p>
+                    </div>
+                    <div className="space-y-3">
+                      <button 
+                        onClick={() => setShowReportEditor(true)}
+                        disabled={isGeneratingPDF}
+                        className="w-full py-4 bg-black text-white rounded-2xl font-bold text-sm hover:bg-black/80 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {isGeneratingPDF ? (
+                          <>
+                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                            Generating...
+                          </>
+                        ) : (
+                          <>
+                            <FileText size={18} /> Download PDF Report
+                          </>
+                        )}
+                      </button>
+                      <p className="text-[10px] text-center text-black/30 font-medium">
+                        Generates a high-quality PDF validation report.
+                      </p>
+                      <button 
+                        onClick={() => {
+                          window.focus();
+                          window.print();
+                        }}
+                        className="w-full py-2 text-black/40 hover:text-black text-[10px] font-bold uppercase tracking-widest transition-all"
+                      >
+                        Print via Browser Dialog
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-[32px] p-8 border border-black/5 shadow-sm space-y-6">
+                    <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-600">
+                      <Activity size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-semibold tracking-tight">Processed Dataset</h3>
+                      <p className="text-sm text-black/40 mt-1">Export the cleaned and flagged dataset in CSV format.</p>
+                    </div>
+                    <button 
+                      onClick={() => exportProcessedDataToCSV(rawData, comparisons)}
+                      className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold text-sm hover:bg-emerald-700 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Download size={18} /> Export CSV
+                    </button>
+                  </div>
+
+                  <div className="bg-white rounded-[32px] p-8 border border-black/5 shadow-sm space-y-6">
+                    <div className="w-12 h-12 bg-purple-50 rounded-2xl flex items-center justify-center text-purple-600">
+                      <TrendingUp size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-semibold tracking-tight">Key Outputs</h3>
+                      <p className="text-sm text-black/40 mt-1">Summary of ranges, shifts, and misclassification rates.</p>
+                    </div>
+                    <button 
+                      onClick={() => activeResults && exportKeyOutputsToCSV(activeResults, analysisConfig)}
+                      className="w-full py-4 bg-purple-600 text-white rounded-2xl font-bold text-sm hover:bg-purple-700 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Download size={18} /> Export Key Data
+                    </button>
+                  </div>
+                </div>
+              ) : dashboardTab === 'executive' ? (
+                <div className="space-y-8">
+                  <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm flex items-center justify-between no-print">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight">Executive Summary</h3>
+                      <p className="text-xs text-black/40 font-medium">Clinical recommendation and risk profile based on the MU-Aware statistical engine.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => setDashboardTab('technical')}
+                        className="px-4 py-2 bg-black/5 hover:bg-black/10 text-black/60 rounded-xl text-xs font-bold transition-all flex items-center gap-2"
+                      >
+                        <Settings size={14} />
+                        Technical View
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                   {/* Stability Banner */}
                   {activeResults?.warnings && activeResults.warnings.length > 0 && (
                     <div className="lg:col-span-3 bg-amber-50 border border-amber-200 rounded-2xl p-4 flex gap-4 items-start">
@@ -2224,41 +2907,6 @@ export default function App() {
                             <li key={idx}>{warning}</li>
                           ))}
                         </ul>
-                      </div>
-                      {/* Assumptions & Limitations */}
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-8 border-t border-black/5">
-                        <div className="space-y-4">
-                          <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
-                            Key Assumptions
-                            <InfoTooltip content="Fundamental premises upon which this statistical model is built." />
-                          </h4>
-                          <ul className="space-y-3">
-                            {generateAssumptionsAndLimitations(activeResults, analysisConfig).assumptions.map((item, i) => (
-                              <li key={i} className="flex gap-3 text-xs text-black/60 leading-relaxed">
-                                <div className="w-1 h-1 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                                {item}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                        <div className="space-y-4">
-                          <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
-                            Limitations & Cautions
-                            <InfoTooltip content="Factors that may limit the generalisability or accuracy of these findings." />
-                          </h4>
-                          <ul className="space-y-3">
-                            {generateAssumptionsAndLimitations(activeResults, analysisConfig).limitations.length > 0 ? (
-                              generateAssumptionsAndLimitations(activeResults, analysisConfig).limitations.map((item, i) => (
-                                <li key={i} className="flex gap-3 text-xs text-black/60 leading-relaxed">
-                                  <div className="w-1 h-1 rounded-full bg-amber-400 mt-1.5 shrink-0" />
-                                  {item}
-                                </li>
-                              ))
-                            ) : (
-                              <li className="text-xs text-black/30 italic">No significant limitations identified for this dataset.</li>
-                            )}
-                          </ul>
-                        </div>
                       </div>
                     </div>
                   )}
@@ -2303,6 +2951,28 @@ export default function App() {
                         <div className="w-2 h-2 rounded-full bg-blue-500" />
                         <span className="text-[10px] font-bold uppercase tracking-widest opacity-40">MU-Aware Engine</span>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Historical & Trend Context (Integrated V1.1) */}
+                  <div className="lg:col-span-3 space-y-8">
+                    <div className="flex items-center gap-4 mb-2">
+                      <div className="h-px flex-1 bg-black/5" />
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-black/30">Historical & Trend Context</p>
+                      <div className="h-px flex-1 bg-black/5" />
+                    </div>
+                    
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+                      {activeResults && <DescriptiveDataOverview data={rawData} comparisons={comparisons} config={analysisConfig} />}
+                      {activeResults && <TemporalSignalPanel results={activeResults} />}
+                    </div>
+
+                    <div className="bg-blue-50/50 border border-blue-100/50 p-4 rounded-2xl flex items-start gap-3">
+                      <Info size={16} className="text-blue-600 mt-0.5" />
+                      <p className="text-[10px] text-blue-800/70 leading-relaxed">
+                        <strong>Integration Note:</strong> The descriptive overview and temporal signals provide historical context. 
+                        While they inform the overall risk profile, the primary recommendation is driven by the MU-Aware comparison of the current and new lots.
+                      </p>
                     </div>
                   </div>
 
@@ -2710,9 +3380,62 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Assumptions & Limitations */}
+                  <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-2 gap-8 p-8 bg-white rounded-[32px] border border-black/5 shadow-sm">
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
+                        Key Assumptions
+                        <InfoTooltip content="Fundamental premises upon which this statistical model is built." />
+                      </h4>
+                      <ul className="space-y-3">
+                        {generateAssumptionsAndLimitations(activeResults, analysisConfig).assumptions.map((item, i) => (
+                          <li key={i} className="flex gap-3 text-xs text-black/60 leading-relaxed">
+                            <div className="w-1 h-1 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-black/40 flex items-center gap-2">
+                        Limitations & Cautions
+                        <InfoTooltip content="Factors that may limit the generalisability or accuracy of these findings." />
+                      </h4>
+                      <ul className="space-y-3">
+                        {generateAssumptionsAndLimitations(activeResults, analysisConfig).limitations.length > 0 ? (
+                          generateAssumptionsAndLimitations(activeResults, analysisConfig).limitations.map((item, i) => (
+                            <li key={i} className="flex gap-3 text-xs text-black/60 leading-relaxed">
+                              <div className="w-1 h-1 rounded-full bg-amber-400 mt-1.5 shrink-0" />
+                              {item}
+                            </li>
+                          ))
+                        ) : (
+                          <li className="text-xs text-black/30 italic">No significant limitations identified for this dataset.</li>
+                        )}
+                      </ul>
+                    </div>
+                  </div>
                 </div>
+              </div>
               ) : dashboardTab === 'technical' ? (
                 <div className="space-y-8">
+                  <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm flex items-center justify-between no-print">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight">Technical Validation</h3>
+                      <p className="text-xs text-black/40 font-medium">Deep dive into statistical metrics, distribution shifts, and temporal signals. Use this view for auditing and technical verification.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => setDashboardTab('executive')}
+                        className="px-4 py-2 bg-black/5 hover:bg-black/10 text-black/60 rounded-xl text-xs font-bold transition-all flex items-center gap-2"
+                      >
+                        <FlaskConical size={14} />
+                        Executive View
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Technical Summary View */}
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     {/* Regression Method */}
@@ -2837,7 +3560,10 @@ export default function App() {
                     </div>
                   </div>
 
-                  {activeResults && <TemporalSignalPanel results={activeResults} />}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+                    {activeResults && <DescriptiveDataOverview data={rawData} comparisons={comparisons} config={analysisConfig} />}
+                    {activeResults && <TemporalSignalPanel results={activeResults} />}
+                  </div>
                   {activeResults && <MethodRobustnessPanel results={activeResults} />}
 
                   <div className="bg-amber-50 border border-amber-100 p-6 rounded-2xl flex gap-4">
@@ -2957,10 +3683,10 @@ export default function App() {
                   </div>
                 </div>
               )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </main>
       
       {/* Footer */}
       <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-black/5 flex flex-col md:flex-row justify-between items-center gap-6 opacity-40 no-print">
@@ -2979,12 +3705,13 @@ export default function App() {
         onUpdate={setReportCommentary}
         onPrint={() => {
           setShowReportEditor(false);
-          setTimeout(() => window.print(), 100);
+          handleDownloadPDF();
         }}
       />
 
       {activeResults && (
         <PrintReport 
+          ref={reportRef}
           results={activeResults}
           config={analysisConfig}
           commentary={reportCommentary}
@@ -3086,27 +3813,27 @@ function ReportEditorModal({
   );
 }
 
-function PrintReport({ 
-  results, 
-  config, 
-  commentary, 
-  rawData, 
-  comparisons 
-}: { 
+const PrintReport = React.forwardRef<HTMLDivElement, { 
   results: AnalysisResults; 
   config: AnalysisConfig; 
   commentary: ReportCommentary;
   rawData: ProcessedDataRow[];
   comparisons: Comparison[];
-}) {
+}>(({ 
+  results, 
+  config, 
+  commentary, 
+  rawData, 
+  comparisons 
+}, ref) => {
   return (
-    <div className="print-only bg-white text-black p-8 font-sans">
+    <div ref={ref} className="print-only p-8 font-sans" style={{ backgroundColor: '#ffffff', color: '#000000' }}>
       {/* Medical Director Report */}
       <section className="space-y-8">
-        <div className="flex justify-between items-start border-b-2 border-black pb-4">
+        <div className="flex justify-between items-start pb-4" style={{ borderBottom: '2px solid #000000' }}>
           <div>
             <h1 className="text-3xl font-bold tracking-tighter">Medical Director Validation Report</h1>
-            <p className="text-sm font-bold uppercase tracking-widest text-black/60">APTT Therapeutic Range Verification</p>
+            <p className="text-sm font-bold uppercase tracking-widest" style={{ color: '#666666' }}>APTT Therapeutic Range Verification</p>
           </div>
           <div className="text-right">
             <p className="text-xs font-bold uppercase tracking-widest">Date: {new Date().toLocaleDateString()}</p>
@@ -3117,43 +3844,42 @@ function PrintReport({
         <div className="grid grid-cols-3 gap-8">
           <div className="col-span-2 space-y-6">
             <div>
-              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Executive Summary</h2>
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Executive Summary</h2>
               <p className="text-sm leading-relaxed">{commentary.executiveSummary}</p>
             </div>
 
             <div className="grid grid-cols-2 gap-6">
-              <div className="bg-black/5 p-4 rounded-2xl">
-                <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-2">Decision Category</h3>
+              <div className="p-4 rounded-2xl" style={{ backgroundColor: '#f5f5f5' }}>
+                <h3 className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: '#999999' }}>Decision Category</h3>
                 <div className="flex items-center gap-3">
-                  <div className={cn(
-                    "w-4 h-4 rounded-full",
-                    results.decision === 'No change' ? "bg-emerald-500" :
-                    results.decision === 'Minor change' ? "bg-amber-500" : "bg-red-500"
-                  )} />
+                  <div className="w-4 h-4 rounded-full" style={{
+                    backgroundColor: results.decision === 'No change' ? '#10b981' :
+                    results.decision === 'Minor change' ? '#f59e0b' : '#ef4444'
+                  }} />
                   <span className="text-lg font-bold uppercase tracking-tight">
                     {results.decision}
                   </span>
                 </div>
               </div>
-              <div className="bg-black/5 p-4 rounded-2xl">
-                <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-2">Confidence Level</h3>
+              <div className="p-4 rounded-2xl" style={{ backgroundColor: '#f5f5f5' }}>
+                <h3 className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: '#999999' }}>Confidence Level</h3>
                 <span className="text-lg font-bold uppercase tracking-tight">{results.confidence}</span>
               </div>
             </div>
 
             <div className="space-y-4">
-              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Proposed Range Shift</h2>
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Proposed Range Shift</h2>
               <div className="grid grid-cols-3 gap-4">
-                <div className="text-center p-3 border border-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Lower Limit</p>
+                <div className="text-center p-3 rounded-xl" style={{ border: '1px solid #f0f0f0' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Lower Limit</p>
                   <p className="text-xl font-bold">{results.shifts.lower > 0 ? '+' : ''}{results.shifts.lower.toFixed(1)}s</p>
                 </div>
-                <div className="text-center p-3 border border-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Upper Limit</p>
+                <div className="text-center p-3 rounded-xl" style={{ border: '1px solid #f0f0f0' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Upper Limit</p>
                   <p className="text-xl font-bold">{results.shifts.upper > 0 ? '+' : ''}{results.shifts.upper.toFixed(1)}s</p>
                 </div>
-                <div className="text-center p-3 border border-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Width Shift</p>
+                <div className="text-center p-3 rounded-xl" style={{ border: '1px solid #f0f0f0' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Width Shift</p>
                   <p className="text-xl font-bold">
                     {results.shifts.width > 0 ? '+' : ''}{results.shifts.width.toFixed(1)}s
                   </p>
@@ -3163,27 +3889,27 @@ function PrintReport({
           </div>
 
           <div className="col-span-1 space-y-6">
-            <div className="bg-black p-6 rounded-[32px] text-white">
-              <h3 className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4">Proposed Range</h3>
+            <div className="p-6 rounded-[32px]" style={{ backgroundColor: '#000000', color: '#ffffff' }}>
+              <h3 className="text-[10px] font-bold uppercase tracking-widest mb-4" style={{ color: 'rgba(255,255,255,0.4)' }}>Proposed Range</h3>
               <div className="text-4xl font-bold tracking-tighter mb-2">
                 {results.proposedRange.lower} – {results.proposedRange.upper}s
               </div>
-              <p className="text-[10px] font-medium text-white/60">Optimized for {config.therapeuticXaRange.lower}-{config.therapeuticXaRange.upper} IU/mL anti-Xa</p>
+              <p className="text-[10px] font-medium" style={{ color: 'rgba(255,255,255,0.6)' }}>Optimized for {config.therapeuticXaRange.lower}-{config.therapeuticXaRange.upper} IU/mL anti-Xa</p>
             </div>
 
             <div className="space-y-4">
-              <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Impact Summary</h3>
+              <h3 className="text-[10px] font-bold uppercase tracking-widest" style={{ color: '#999999' }}>Impact Summary</h3>
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
-                  <span className="text-black/60">Misclassification</span>
+                  <span style={{ color: '#666666' }}>Misclassification</span>
                   <span className="font-bold">{(results.misclassification.proposed.rate).toFixed(1)}%</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-black/60">Risk Score</span>
+                  <span style={{ color: '#666666' }}>Risk Score</span>
                   <span className="font-bold">{results.misclassification.proposed.weightedScore.toFixed(1)}</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-black/60">Improvement</span>
+                  <span style={{ color: '#666666' }}>Improvement</span>
                   <span className="font-bold">{results.misclassification.improvement.toFixed(1)}%</span>
                 </div>
               </div>
@@ -3192,12 +3918,12 @@ function PrintReport({
         </div>
 
         <div className="space-y-4">
-          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Medical Director Commentary</h2>
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Medical Director Commentary</h2>
           <p className="text-sm leading-relaxed whitespace-pre-wrap">{commentary.medicalDirectorNotes}</p>
         </div>
 
         <div className="space-y-4">
-          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Assumptions & Limitations</h2>
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Assumptions & Limitations</h2>
           <p className="text-sm leading-relaxed whitespace-pre-wrap">{commentary.limitationsNotes}</p>
         </div>
       </section>
@@ -3206,38 +3932,38 @@ function PrintReport({
 
       {/* Technical Report */}
       <section className="space-y-8 pt-8">
-        <div className="flex justify-between items-start border-b-2 border-black pb-4">
+        <div className="flex justify-between items-start pb-4" style={{ borderBottom: '2px solid #000000' }}>
           <div>
             <h1 className="text-3xl font-bold tracking-tighter">Technical Validation Supplement</h1>
-            <p className="text-sm font-bold uppercase tracking-widest text-black/60">Statistical Analysis & QC Summary</p>
+            <p className="text-sm font-bold uppercase tracking-widest" style={{ color: '#666666' }}>Statistical Analysis & QC Summary</p>
           </div>
         </div>
 
         <div className="grid grid-cols-2 gap-12">
           <div className="space-y-6">
             <div>
-              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Methodology</h2>
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Methodology</h2>
               <p className="text-sm leading-relaxed whitespace-pre-wrap">{commentary.technicalNotes}</p>
             </div>
 
             <div className="space-y-4">
-              <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Regression Statistics</h3>
+              <h3 className="text-[10px] font-bold uppercase tracking-widest" style={{ color: '#999999' }}>Regression Statistics</h3>
               <table className="w-full text-sm">
-                <tbody className="divide-y divide-black/5">
+                <tbody style={{ borderTop: '1px solid #eeeeee' }}>
                   <tr>
-                    <td className="py-2 text-black/60">Correlation (R²)</td>
-                    <td className="py-2 font-bold text-right">{results.regressionModel.r2.toFixed(4)}</td>
+                    <td className="py-2" style={{ color: '#666666', borderBottom: '1px solid #f5f5f5' }}>Correlation (R²)</td>
+                    <td className="py-2 font-bold text-right" style={{ borderBottom: '1px solid #f5f5f5' }}>{results.regressionModel.r2.toFixed(4)}</td>
                   </tr>
                   <tr>
-                    <td className="py-2 text-black/60">Slope</td>
-                    <td className="py-2 font-bold text-right">{results.regressionModel.slope.toFixed(4)}</td>
+                    <td className="py-2" style={{ color: '#666666', borderBottom: '1px solid #f5f5f5' }}>Slope</td>
+                    <td className="py-2 font-bold text-right" style={{ borderBottom: '1px solid #f5f5f5' }}>{results.regressionModel.slope.toFixed(4)}</td>
                   </tr>
                   <tr>
-                    <td className="py-2 text-black/60">Intercept</td>
-                    <td className="py-2 font-bold text-right">{results.regressionModel.intercept.toFixed(4)}</td>
+                    <td className="py-2" style={{ color: '#666666', borderBottom: '1px solid #f5f5f5' }}>Intercept</td>
+                    <td className="py-2 font-bold text-right" style={{ borderBottom: '1px solid #f5f5f5' }}>{results.regressionModel.intercept.toFixed(4)}</td>
                   </tr>
                   <tr>
-                    <td className="py-2 text-black/60">Method</td>
+                    <td className="py-2" style={{ color: '#666666' }}>Method</td>
                     <td className="py-2 font-bold text-right">{results.regressionMethod}</td>
                   </tr>
                 </tbody>
@@ -3247,22 +3973,22 @@ function PrintReport({
 
           <div className="space-y-6">
             <div className="space-y-4">
-              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Data Quality Summary</h2>
+              <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Data Quality Summary</h2>
               <div className="grid grid-cols-2 gap-4">
-                <div className="p-3 bg-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Total Points</p>
+                <div className="p-3 rounded-xl" style={{ backgroundColor: '#f5f5f5' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Total Points</p>
                   <p className="text-lg font-bold">{rawData.length}</p>
                 </div>
-                <div className="p-3 bg-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Usable Points</p>
+                <div className="p-3 rounded-xl" style={{ backgroundColor: '#f5f5f5' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Usable Points</p>
                   <p className="text-lg font-bold">{results.summary.qc.totalUsable}</p>
                 </div>
-                <div className="p-3 bg-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Excluded Points</p>
-                  <p className="text-lg font-bold text-red-600">{rawData.filter(d => d.excluded).length}</p>
+                <div className="p-3 rounded-xl" style={{ backgroundColor: '#f5f5f5' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Excluded Points</p>
+                  <p className="text-lg font-bold" style={{ color: '#dc2626' }}>{rawData.filter(d => d.excluded).length}</p>
                 </div>
-                <div className="p-3 bg-black/5 rounded-xl">
-                  <p className="text-[8px] font-bold uppercase text-black/40">Primary Comparison</p>
+                <div className="p-3 rounded-xl" style={{ backgroundColor: '#f5f5f5' }}>
+                  <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>Primary Comparison</p>
                   <p className="text-xs font-bold truncate">{comparisons.find(c => c.isPrimary)?.label || 'None'}</p>
                 </div>
               </div>
@@ -3270,49 +3996,71 @@ function PrintReport({
 
             {config.includeMU && (
               <div className="space-y-4">
-                <h3 className="text-[10px] font-bold uppercase tracking-widest text-black/40">Uncertainty of Measurement (Therapeutic Band)</h3>
+                <h3 className="text-[10px] font-bold uppercase tracking-widest" style={{ color: '#999999' }}>Uncertainty of Measurement (Therapeutic Band)</h3>
                 <div className="grid grid-cols-3 gap-2">
-                  <div className="p-2 border border-black/5 rounded-lg text-center">
-                    <p className="text-[8px] font-bold text-black/40 uppercase">anti-Xa</p>
+                  <div className="p-2 rounded-lg text-center" style={{ border: '1px solid #f0f0f0' }}>
+                    <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>anti-Xa</p>
                     <p className="text-xs font-bold">{config.muBands.xa[1]?.value}{config.muUnits.xa === 'CV%' ? '%' : ''}</p>
                   </div>
-                  <div className="p-2 border border-black/5 rounded-lg text-center">
-                    <p className="text-[8px] font-bold text-black/40 uppercase">APTT Cur</p>
+                  <div className="p-2 rounded-lg text-center" style={{ border: '1px solid #f0f0f0' }}>
+                    <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>APTT Cur</p>
                     <p className="text-xs font-bold">{config.muBands.apttCurrent[1]?.value}{config.muUnits.apttCurrent === 'CV%' ? '%' : ''}</p>
                   </div>
-                  <div className="p-2 border border-black/5 rounded-lg text-center">
-                    <p className="text-[8px] font-bold text-black/40 uppercase">APTT New</p>
+                  <div className="p-2 rounded-lg text-center" style={{ border: '1px solid #f0f0f0' }}>
+                    <p className="text-[8px] font-bold uppercase" style={{ color: '#999999' }}>APTT New</p>
                     <p className="text-xs font-bold">{config.muBands.apttNew[1]?.value}{config.muUnits.apttNew === 'CV%' ? '%' : ''}</p>
                   </div>
                 </div>
               </div>
             )}
 
-            {results.temporalSignal && results.temporalSignal.possible && (
+            {results.temporalSignal && (
               <div className="space-y-4">
-                <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Trend Analysis (Temporal Signal)</h2>
-                <p className="text-sm leading-relaxed mb-4">{results.temporalSignal.interpretation}</p>
-                <div className="grid grid-cols-2 gap-4">
-                  {results.temporalSignal.metrics.map((m, i) => (
-                    <div key={i} className="p-3 border border-black/5 rounded-xl">
-                      <p className="text-[8px] font-bold uppercase text-black/40">{m.label}</p>
-                      <div className="flex justify-between items-end">
-                        <p className="text-lg font-bold">R² {m.r2.toFixed(3)}</p>
-                        <p className="text-[10px] text-black/60">n={m.n}</p>
-                      </div>
-                    </div>
-                  ))}
+                <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Trend Analysis (Temporal Signal)</h2>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: '#999999' }}>
+                    Status: {results.temporalSignal.possible ? 'Assessable' : 'Not Assessable'}
+                  </p>
+                  {results.temporalSignal.possible && (
+                    <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: '#4f46e5' }}>
+                      Method: {results.temporalSignal.linkageMethod}
+                    </p>
+                  )}
                 </div>
+                <p className="text-sm leading-relaxed mb-4">{results.temporalSignal.interpretation}</p>
+                
+                {results.temporalSignal.possible && (
+                  <div className="space-y-4">
+                    <table className="w-full text-[10px] text-left">
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #eeeeee' }}>
+                          <th className="pb-1 font-bold uppercase tracking-widest" style={{ color: '#999999' }}>Linkage</th>
+                          <th className="pb-1 font-bold uppercase tracking-widest text-right" style={{ color: '#999999' }}>Avg Shift</th>
+                          <th className="pb-1 font-bold uppercase tracking-widest text-right" style={{ color: '#999999' }}>Width Δ</th>
+                        </tr>
+                      </thead>
+                      <tbody style={{ borderTop: '1px solid #eeeeee' }}>
+                        {results.temporalSignal.metrics.map((m, i) => (
+                          <tr key={i} style={{ borderBottom: '1px solid #f5f5f5' }}>
+                            <td className="py-1 font-bold">{m.linkLabel}</td>
+                            <td className="py-1 font-bold text-right">{m.avgShift?.toFixed(1)}s</td>
+                            <td className="py-1 font-bold text-right">{m.widthChange?.toFixed(1)}s</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </div>
 
         <div className="space-y-4">
-          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 border-b border-black/10 pb-1">Exclusion Audit</h2>
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-3 pb-1" style={{ borderBottom: '1px solid #eeeeee' }}>Exclusion Audit</h2>
           <table className="w-full text-[10px]">
             <thead>
-              <tr className="border-b border-black">
+              <tr style={{ borderBottom: '2px solid #000000' }}>
                 <th className="text-left py-2">ID</th>
                 <th className="text-left py-2">Reason</th>
                 <th className="text-right py-2">Xa</th>
@@ -3320,9 +4068,9 @@ function PrintReport({
                 <th className="text-right py-2">APTT Cur</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-black/5">
+            <tbody style={{ borderTop: '1px solid #eeeeee' }}>
               {rawData.filter(d => d.excluded).slice(0, 10).map(d => (
-                <tr key={d.id}>
+                <tr key={d.id} style={{ borderBottom: '1px solid #f5f5f5' }}>
                   <td className="py-1">{d.id}</td>
                   <td className="py-1">{d.exclusionReason}</td>
                   <td className="py-1 text-right">{d.xa}</td>
@@ -3332,7 +4080,7 @@ function PrintReport({
               ))}
               {rawData.filter(d => d.excluded).length > 10 && (
                 <tr>
-                  <td colSpan={5} className="py-1 text-center italic text-black/40">
+                  <td colSpan={5} className="py-1 text-center italic" style={{ color: '#999999' }}>
                     ... and {rawData.filter(d => d.excluded).length - 10} more exclusions
                   </td>
                 </tr>
@@ -3343,4 +4091,4 @@ function PrintReport({
       </section>
     </div>
   );
-}
+});

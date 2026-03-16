@@ -41,7 +41,35 @@ export const fitDemingRegression = (
   return fitStandardDeming(validData, xKey, yKey, lambda);
 };
 
+/**
+ * Calculates the Pearson correlation coefficient squared (R2).
+ * This is the standard measure of linear correlation strength.
+ */
+const calculatePearsonR2 = (x: number[], y: number[]): number => {
+  const n = x.length;
+  if (n < 2) return 0;
+  
+  const meanX = x.reduce((a, b) => a + b, 0) / n;
+  const meanY = y.reduce((a, b) => a + b, 0) / n;
+  
+  let sxx = 0, syy = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = x[i] - meanX;
+    const dy = y[i] - meanY;
+    sxx += dx * dx;
+    syy += dy * dy;
+    sxy += dx * dy;
+  }
+  
+  const den = Math.sqrt(sxx) * Math.sqrt(syy);
+  if (den === 0) return 0;
+  
+  const r = sxy / den;
+  return r * r;
+};
+
 const fitStandardDeming = (
+
   data: any[],
   xKey: string,
   yKey: string,
@@ -91,22 +119,23 @@ const fitWeightedDeming = (
   const x = data.map(d => d[xKey] as number);
   const y = data.map(d => d[yKey] as number);
 
-  // Initial guess for slope using unweighted Deming or OLS
-  let slope = 1.0;
-  let intercept = 0;
+  // Initial guess for slope using OLS for better convergence
+  const ols = fitOLSRegression(data, xKey, yKey);
+  let slope = ols.slope || 1.0;
+  let intercept = ols.intercept || 0;
   
-  const maxIterations = 50;
-  const tolerance = 1e-7;
+  const maxIterations = 100;
+  const tolerance = 1e-8;
 
   for (let iter = 0; iter < maxIterations; iter++) {
     const prevSlope = slope;
     
     // Calculate weights W_i = 1 / (var_yi + slope^2 * var_xi)
-    // Since weights[i].wx = 1/var_xi and weights[i].wy = 1/var_yi
-    // W_i = 1 / (1/wy + slope^2 / wx) = (wx * wy) / (wx + slope^2 * wy)
     const W = weights.map(wt => (wt.wx * wt.wy) / (wt.wx + slope * slope * wt.wy));
     
     const sumW = W.reduce((a, b) => a + b, 0);
+    if (sumW === 0) break;
+
     const meanX = W.reduce((a, b, i) => a + b * x[i], 0) / sumW;
     const meanY = W.reduce((a, b, i) => a + b * y[i], 0) / sumW;
     
@@ -119,19 +148,12 @@ const fitWeightedDeming = (
       sxy += W[i] * dx * dy;
     }
     
-    // Lambda_eff = weighted average lambda? 
-    // Actually, for weighted Deming with varying lambda_i, we solve the quadratic:
-    // beta^2 * Sxy + beta * (lambda * Sxx - Syy) - lambda * Sxy = 0
-    // But here lambda is effectively incorporated into the weights W_i.
-    // A common approximation for weighted Deming is to use the weighted sums of squares:
-    const lambda = syy / sxx; // This is a rough estimate for the iteration
+    const diff = syy - sxx;
     
-    // Using the Deming formula on weighted sums:
-    const diff = syy - sxx; // Assuming lambda=1 for the weighted sums because variances are in W
-    
-    if (Math.abs(sxy) < 1e-10) {
-      slope = syy > sxx ? 1e6 : 0; // Avoid division by zero
+    if (Math.abs(sxy) < 1e-12) {
+      slope = syy > sxx ? 1e6 : 0; 
     } else {
+      // Quadratic formula for Deming slope
       slope = (diff + Math.sqrt(diff * diff + 4 * sxy * sxy)) / (2 * sxy);
     }
     
@@ -140,16 +162,8 @@ const fitWeightedDeming = (
     if (Math.abs(slope - prevSlope) < tolerance) break;
   }
 
-  // Calculate R2 (weighted)
-  const meanY = y.reduce((a, b) => a + b, 0) / n;
-  let ssRes = 0;
-  let ssTot = 0;
-  for (let i = 0; i < n; i++) {
-    const pred = intercept + slope * x[i];
-    ssRes += Math.pow(y[i] - pred, 2);
-    ssTot += Math.pow(y[i] - meanY, 2);
-  }
-  const r2 = 1 - (ssRes / ssTot);
+  // Use Pearson R2 for consistent reporting
+  const r2 = calculatePearsonR2(x, y);
 
   return { slope, intercept, r2, n, method: 'Weighted Deming' };
 };
@@ -176,14 +190,7 @@ export const fitOLSRegression = (
   const slope = den === 0 ? 0 : num / den;
   const intercept = meanY - slope * meanX;
 
-  let ssRes = 0;
-  let ssTot = 0;
-  for (let i = 0; i < n; i++) {
-    const pred = intercept + slope * x[i];
-    ssRes += Math.pow(y[i] - pred, 2);
-    ssTot += Math.pow(y[i] - meanY, 2);
-  }
-  const r2 = ssTot === 0 ? 0 : 1 - (ssRes / ssTot);
+  const r2 = calculatePearsonR2(x, y);
 
   return { slope, intercept, r2, n, method: 'OLS' as any };
 };
@@ -226,16 +233,7 @@ export const fitPassingBablokRegression = (
     ? (intercepts[intercepts.length / 2 - 1] + intercepts[intercepts.length / 2]) / 2
     : intercepts[Math.floor(intercepts.length / 2)];
 
-  // R2 (approximate for PB)
-  const meanY = y.reduce((a, b) => a + b, 0) / n;
-  let ssRes = 0;
-  let ssTot = 0;
-  for (let i = 0; i < n; i++) {
-    const pred = intercept + slope * x[i];
-    ssRes += Math.pow(y[i] - pred, 2);
-    ssTot += Math.pow(y[i] - meanY, 2);
-  }
-  const r2 = ssTot === 0 ? 0 : 1 - (ssRes / ssTot);
+  const r2 = calculatePearsonR2(x, y);
 
   return { slope, intercept, r2, n, method: 'Passing-Bablok' as any };
 };
