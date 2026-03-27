@@ -2093,7 +2093,7 @@ export default function App() {
             <FlaskConical size={24} />
           </div>
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">APTT Therapeutic Range Verifier</h1>
+            <h1 className="text-lg font-semibold tracking-tight">aPTT TR Viewer</h1>
             <p className="text-xs text-black/40 font-medium uppercase tracking-wider">Specialist Haemostasis Decision Support</p>
           </div>
         </div>
@@ -4557,7 +4557,7 @@ export default function App() {
       
       {/* Footer */}
       <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-black/5 flex flex-col md:flex-row justify-between items-center gap-6 opacity-40 no-print">
-        <p className="text-xs font-medium">© 2026 APTT Therapeutic Range Verifier. All calculations performed locally.</p>
+        <p className="text-xs font-medium">© 2026 aPTT TR Viewer. All calculations performed locally.</p>
         <div className="flex gap-6 text-xs font-bold uppercase tracking-widest">
           <a href="#" className="hover:text-black transition-colors">Documentation</a>
           <a href="#" className="hover:text-black transition-colors">Methodology</a>

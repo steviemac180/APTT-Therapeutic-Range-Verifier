@@ -1,5 +1,5 @@
 {
-  "name": "APTT Therapeutic Range Verifier",
+  "name": "aPTT TR Viewer",
   "description": "A specialist haemostasis laboratory decision-support tool for analysing APTT lot verification data against anti-Xa.",
   "requestFramePermissions": []
 }
